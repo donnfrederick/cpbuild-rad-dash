@@ -1,0 +1,634 @@
+/**
+ * CP Build Command Center — Global Styles
+ * Source of truth: /Commandcenterreboot (Figma Make prototype) → DESIGN_SYSTEM.md + theme.css
+ *
+ * Rules (from DESIGN_SYSTEM.md):
+ *  1. All new UI must strictly follow this design system
+ *  2. Do not introduce new colors
+ *  3. Do not introduce new font sizes
+ *  4. Do not introduce new spacing values
+ *  5. No arbitrary values — only established tokens
+ */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─── Design System Tokens ─────────────────────────────────────────────────── */
+
+:root {
+  /* ── Color Palette ───────────────────────────────────────────────────────── */
+
+  /* Primary */
+  --primary-700: #1F3A5F;
+  --primary-600: #274B75;
+  --primary-500: #2E5C8A;
+  /* RGB tuple for rgba(..., α) shadows — must match --primary-500 (#2E5C8A) */
+  --primary-500-rgb: 46, 92, 138;
+  --primary-400: #4A7FAB;
+  --primary-300: #7AAFD4;
+  --primary-200: #B8D4EC;
+  --primary-100: #E8F0F7;
+  --primary-50:  #F0F5FB;
+
+  /* Secondary */
+  --secondary-700: #2F3B45;
+  --secondary-500: #5C6B78;
+  --secondary-100: #EEF2F5;
+
+  /* Neutrals */
+  --neutral-900: #1A1F24;
+  --neutral-700: #3A434B;
+  --neutral-500: #6E7781;
+  --neutral-400: #9BA4AD;
+  --neutral-350: #BCC5CE;
+  --neutral-300: #C9D1D9;
+  --neutral-250: #D8DFE7;
+  --neutral-200: #E2E8EE;
+  --neutral-100: #F4F6F8;
+  --neutral-50:  #FAFBFC;
+  --neutral-0:   #FFFFFF;
+
+  /* Feedback */
+  --success-700: #175E3A;
+  --success-600: #1F7A4C;
+  --success-500: #2A9B60;
+  --success-300: #7EC9A0;
+  --success-100: #E6F4EC;
+  --success-50:  #F0FAF5;
+  --warning-600: #B45309;
+  --warning-100: #FEF3C7;
+  --error-700:   #912018;
+  --error-600:   #B42318;
+  --error-500:   #F04438;
+  --error-400:   #F97066;
+  --error-300:   #FDA29B;
+  --error-100:   #FEE4E2;
+  --error-50:    #FEF3F2;
+
+  /* Violet — stage indicator for STAGING phase scope squares */
+  --violet-600: #4F46E5;
+  --violet-400: #818CF8;
+  --violet-100: #E0E7FF;
+
+  /* ── Internal Tooling — NOT part of the user-facing design system ────────────
+   * Used exclusively by dev/admin-only UI: DevTools panel, Role Preview banner,
+   * and any future features visible only to ADMIN, DESIGNER, or DEVELOPER roles.
+   * Changing --dev-purple updates all of those surfaces at once. */
+  --dev-purple:       #7C3AED;   /* violet-600 — primary dev UI color */
+  --dev-purple-dark:  #5B21B6;   /* violet-800 — border/accent variant */
+
+  /* ── Type Scale ──────────────────────────────────────────────────────────── */
+  --text-display:    32px;
+  --text-heading:    20px;
+  --text-subheading: 16px;
+  --text-body:       14px;
+  --text-caption:    12px;
+
+  /* ── Font Weights ────────────────────────────────────────────────────────── */
+  --font-weight-semibold: 600;
+  --font-weight-medium:   500;
+  --font-weight-normal:   400;
+
+  /* ── Spacing Scale (8px base unit) ──────────────────────────────────────── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ── Corner Radius ───────────────────────────────────────────────────────── */
+  --radius-sm: 6px;   /* buttons, inputs, small elements */
+  --radius-md: 8px;   /* cards */
+
+  /* ── Shadows / Elevation ─────────────────────────────────────────────────── */
+  --shadow-1: 0px 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-2: 0px 4px 12px rgba(0, 0, 0, 0.08);
+
+  /* ── Focus States ────────────────────────────────────────────────────────── */
+  --focus-ring:       0 0 0 2px var(--primary-500);
+  --focus-ring-error: 0 0 0 2px var(--error-600);
+
+  /* ── Component Dimensions ────────────────────────────────────────────────── */
+  --button-height: 40px;
+  --input-height:  40px;
+  --nav-width:      240px;
+  /* Shared top-bar / sidebar-header height — both must use this token so
+     the horizontal divider lines align perfectly at the nav/content seam. */
+  --top-bar-height: 56px;
+  --icon-size:      20px;
+  --badge-size:     20px;
+
+  /* ── Responsive Layout Tokens ────────────────────────────────────────────── */
+  /*
+   * Base (mobile-first). Overridden at tablet (≥768px) and desktop (≥1024px).
+   * Use these instead of arbitrary px values for all structural spacing.
+   *
+   *  --page-padding-x  Horizontal safe zone — left/right edge of every page
+   *  --page-padding-y  Vertical safe zone — top/bottom breathing room on pages
+   *  --section-gap     Space between major sections on a page
+   *  --component-gap   Space between sibling components within a section
+   *  --card-padding    Internal padding inside content cards / list items
+   *  --inline-gap      Gap between inline items (e.g. icon + label, badge + text)
+   *  --min-touch       Minimum tappable area (44px — iOS HIG / WCAG 2.5.8)
+   *  --content-max-w   Maximum readable content width
+   */
+  --page-padding-x:  16px;
+  --page-padding-y:  16px;
+  --section-gap:     24px;
+  --component-gap:   12px;
+  --card-padding:    16px;
+  --inline-gap:       8px;
+  --min-touch:       44px;
+  --content-max-w: 1280px;
+
+  /* ── Semantic Tokens ─────────────────────────────────────────────────────── */
+  --background: var(--neutral-0);
+  --foreground: var(--neutral-900);
+  --border:     var(--neutral-300);
+
+  /* ── shadcn/ui compatibility bridge ─────────────────────────────────────── */
+  /* Keeps shadcn primitives (Button, Card, Dialog, etc.) working correctly. */
+  --card:                 var(--neutral-0);
+  --card-foreground:      var(--neutral-900);
+  --popover:              var(--neutral-0);
+  --popover-foreground:   var(--neutral-900);
+  --primary:              var(--primary-700);
+  --primary-foreground:   var(--neutral-0);
+  --secondary:            var(--secondary-100);
+  --secondary-foreground: var(--secondary-700);
+  --muted:                var(--neutral-100);
+  --muted-foreground:     var(--neutral-500);
+  --accent:               var(--primary-100);
+  --accent-foreground:    var(--primary-700);
+  --destructive:          var(--error-600);
+  --destructive-foreground: var(--neutral-0);
+  --input:                var(--neutral-300);
+  --ring:                 var(--primary-500);
+
+  /* Shadcn radius expects --radius — map to our smallest radius */
+  --radius: var(--radius-sm);
+
+  /* Charts */
+  --chart-1: var(--primary-500);
+  --chart-2: var(--success-600);
+  --chart-3: var(--warning-600);
+  --chart-4: var(--error-600);
+  --chart-5: var(--neutral-500);
+
+  /* Sidebar */
+  --sidebar:                       var(--neutral-0);
+  --sidebar-foreground:            var(--neutral-900);
+  --sidebar-primary:               var(--primary-700);
+  --sidebar-primary-foreground:    var(--neutral-0);
+  --sidebar-accent:                var(--primary-100);
+  --sidebar-accent-foreground:     var(--primary-700);
+  --sidebar-border:                var(--neutral-300);
+  --sidebar-ring:                  var(--primary-500);
+}
+
+/* ─── Responsive layout-token overrides ─────────────────────────────────── */
+/* Tablet — ≥ 768 px */
+@media (min-width: 768px) {
+  :root {
+    --page-padding-x: 24px;
+    --page-padding-y: 24px;
+    --section-gap:    32px;
+    --component-gap:  16px;
+    --card-padding:   20px;
+    --min-touch:      40px; /* desktop targets can be slightly smaller */
+  }
+}
+
+/* Desktop — ≥ 1024 px */
+@media (min-width: 1024px) {
+  :root {
+    --page-padding-x: 32px;
+    --page-padding-y: 32px;
+    --section-gap:    40px;
+    --component-gap:  20px;
+    --card-padding:   24px;
+  }
+}
+
+/* ─── Dark mode — soft bluish surfaces (primary palette, not near-black) ─── */
+.dark {
+  /* Semantic surfaces */
+  --background:     #243547;
+  --foreground:     #E8F0F7;
+  --card:           #2C4054;
+  --card-foreground: #E8F0F7;
+  --popover:        #2C4054;
+  --popover-foreground: #E8F0F7;
+
+  /* Keep primary actions readable on dark surfaces */
+  --primary:              var(--primary-500);
+  --primary-foreground:   #F4F6F8;
+  --secondary:            #334B61;
+  --secondary-foreground: #D8DFE7;
+  --muted:                #334B61;
+  --muted-foreground:     #9BA4AD;
+  --accent:               var(--primary-600);
+  --accent-foreground:    #E8F0F7;
+  --destructive:          var(--error-400);
+  --border:               #3D5569;
+  --input:                #3D5569;
+  --ring:                 var(--primary-400);
+
+  /* Sidebar — slightly deeper navy than the page */
+  --sidebar:                       #1F3A5F;
+  --sidebar-foreground:            #E8F0F7;
+  --sidebar-primary:               var(--primary-400);
+  --sidebar-primary-foreground:    #F4F6F8;
+  --sidebar-accent:                #274B75;
+  --sidebar-accent-foreground:     #E8F0F7;
+  --sidebar-border:                #3D5569;
+  --sidebar-ring:                  var(--primary-400);
+
+  /*
+   * Remap neutrals so legacy bg-neutral-* / text-neutral-* utilities
+   * stay legible without hunting down every hard-coded reference.
+   */
+  --neutral-0:   #2C4054;
+  --neutral-50:  #243547;
+  --neutral-100: #243547;
+  --neutral-200: #3D5569;
+  --neutral-250: #455F73;
+  --neutral-300: #516575;
+  --neutral-350: #6E7781;
+  --neutral-400: #9BA4AD;
+  --neutral-500: #BCC5CE;
+  --neutral-700: #D8DFE7;
+  --neutral-900: #F4F6F8;
+
+  --secondary-100: #334B61;
+  --secondary-700: #D8DFE7;
+
+  --shadow-1: 0px 1px 2px rgba(0, 0, 0, 0.18);
+  --shadow-2: 0px 4px 12px rgba(0, 0, 0, 0.22);
+}
+
+/* ─── Tailwind theme exposure ───────────────────────────────────────────── */
+/* Exposes design tokens as Tailwind utility classes (text-primary-700, etc.) */
+
+@theme inline {
+  --font-sans: var(--font-inter);
+
+  /* Semantic */
+  --color-background:        var(--background);
+  --color-foreground:        var(--foreground);
+  --color-border:            var(--border);
+
+  /* shadcn/ui */
+  --color-card:              var(--card);
+  --color-card-foreground:   var(--card-foreground);
+  --color-popover:           var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary:           var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary:         var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted:             var(--muted);
+  --color-muted-foreground:  var(--muted-foreground);
+  --color-accent:            var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive:       var(--destructive);
+  --color-input:             var(--input);
+  --color-ring:              var(--ring);
+  --color-chart-1:           var(--chart-1);
+  --color-chart-2:           var(--chart-2);
+  --color-chart-3:           var(--chart-3);
+  --color-chart-4:           var(--chart-4);
+  --color-chart-5:           var(--chart-5);
+  --color-sidebar:           var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary:   var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent:    var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border:    var(--sidebar-border);
+  --color-sidebar-ring:      var(--sidebar-ring);
+
+  /* Full palette as Tailwind utilities */
+  --color-primary-700:    var(--primary-700);
+  --color-primary-500:    var(--primary-500);
+  --color-primary-100:    var(--primary-100);
+  --color-secondary-700:  var(--secondary-700);
+  --color-secondary-500:  var(--secondary-500);
+  --color-secondary-100:  var(--secondary-100);
+  --color-neutral-900:    var(--neutral-900);
+  --color-neutral-700:    var(--neutral-700);
+  --color-neutral-500:    var(--neutral-500);
+  --color-neutral-300:    var(--neutral-300);
+  --color-neutral-100:    var(--neutral-100);
+  --color-neutral-50:     var(--neutral-50);
+  --color-neutral-0:      var(--neutral-0);
+  --color-success-600:    var(--success-600);
+  --color-success-100:    var(--success-100);
+  --color-warning-600:    var(--warning-600);
+  --color-warning-100:    var(--warning-100);
+  --color-error-600:      var(--error-600);
+  --color-error-100:      var(--error-100);
+  --color-error-700:      var(--error-700);
+  --color-error-300:      var(--error-300);
+  --color-error-50:       var(--error-50);
+
+  --color-success-700:    var(--success-700);
+  --color-success-300:    var(--success-300);
+  --color-success-50:     var(--success-50);
+
+  --color-neutral-400:    var(--neutral-400);
+
+  /* Radius */
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-md); /* no lg in design system — map to md */
+  --radius-xl: var(--radius-md);
+}
+
+/* ─── Base layer ────────────────────────────────────────────────────────── */
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    font-size: 16px;
+    overflow-y: auto;
+    @apply bg-background;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-size: var(--text-body);
+    font-weight: var(--font-weight-normal);
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  /* Type scale — exact values from DESIGN_SYSTEM.md */
+  h1 {
+    font-size: var(--text-display);
+    font-weight: var(--font-weight-semibold);
+    line-height: 1.2;
+  }
+  h2 {
+    font-size: var(--text-heading);
+    font-weight: var(--font-weight-semibold);
+    line-height: 1.3;
+  }
+  h3 {
+    font-size: var(--text-subheading);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.4;
+  }
+  h4 {
+    font-size: var(--text-body);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+  label {
+    font-size: var(--text-body);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+  button {
+    font-size: var(--text-body);
+    font-weight: var(--font-weight-semibold);
+    line-height: 1.5;
+  }
+  input, select, textarea {
+    font-size: var(--text-body);
+    font-weight: var(--font-weight-normal);
+    line-height: 1.5;
+  }
+
+  /* Suppress focus ring on programmatic/mouse focus — preserve it for keyboard nav only */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* Focus visible */
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  button:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+
+  /* Table hover states — sticky cells must stay opaque */
+  .table-row td {
+    background-color: var(--neutral-0);
+  }
+  .table-row.hover td {
+    background-color: var(--neutral-50);
+  }
+  .sticky-cell {
+    background-color: var(--neutral-0) !important;
+  }
+  .table-row.hover .sticky-cell {
+    background-color: var(--neutral-50) !important;
+  }
+
+  .dark .table-row td {
+    background-color: var(--card);
+  }
+  .dark .table-row.hover td {
+    background-color: var(--muted);
+  }
+  .dark .sticky-cell {
+    background-color: var(--card) !important;
+  }
+  .dark .table-row.hover .sticky-cell {
+    background-color: var(--muted) !important;
+  }
+
+  /* Mobile safe area utilities */
+  .safe-area-top    { padding-top:    env(safe-area-inset-top); }
+  .safe-area-bottom { padding-bottom: env(safe-area-inset-bottom); }
+}
+
+/* ─── Mobile layout — bottom nav + hide side nav ─────────────────────────── */
+/*
+ * Applied when the real browser window is ≤ 767px wide (actual mobile device):
+ *   - Side nav (aside) hidden — bottom nav takes over
+ *   - #mobile-bottom-nav shown (display: flex)
+ */
+
+/* Real mobile device (≤ 767px) */
+@media (max-width: 767px) {
+  #viewport-root > aside,
+  #project-side-nav {
+    display: none !important;
+  }
+  #mobile-bottom-nav,
+  #project-mobile-bottom-nav {
+    display: flex !important;
+  }
+  /* dvh fixes iOS Safari: 100vh includes browser chrome and pushes bottom nav off-screen.
+     100dvh shrinks when the address bar is visible so the layout always fits. */
+  #viewport-root {
+    height: 100dvh !important;
+  }
+  /* Push Sonner toasts above the mobile bottom nav (52px nav + safe area + gap) */
+  [data-sonner-toaster][data-y-position="bottom"] {
+    bottom: calc(52px + env(safe-area-inset-bottom, 0px) + 12px) !important;
+  }
+}
+
+/* Utility: show/hide by screen type */
+.mobile-only { display: none !important; }
+.desktop-only { display: flex !important; }
+
+@media (max-width: 767px) {
+  .mobile-only  { display: flex !important; }
+  .desktop-only { display: none !important; }
+}
+
+/* ─── UPM link card hover (server component — no JS handlers) ───────────── */
+.upm-link-card {
+  border-color: var(--neutral-200) !important;
+  box-shadow: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.upm-link-card:hover,
+.upm-link-card:focus-visible {
+  border-color: var(--primary-300) !important;
+  box-shadow: 0 0 0 3px var(--primary-50) !important;
+  outline: none;
+}
+
+/* ─── Notifications panel animations ─────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes slideInUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+/* Dictation mic — pulse when listening (classes used by DictationButton) */
+@keyframes dictation-mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(var(--primary-500-rgb, 59, 130, 246), 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(var(--primary-500-rgb, 59, 130, 246), 0.18);
+  }
+}
+.dictation-btn {
+  transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease, border-width 0.2s ease;
+}
+.dictation-btn--listening {
+  animation: dictation-mic-pulse 1.35s ease-in-out infinite;
+}
+
+/* ─── Floating load-more progress (units list + field tracker table) ───────── */
+.loading-rows-toast {
+  position: fixed;
+  right: 16px;
+  z-index: 60;
+  bottom: max(16px, env(safe-area-inset-bottom, 0px));
+}
+@media (max-width: 767px) {
+  .loading-rows-toast {
+    /* Above mobile bottom nav (~49–52px) + gap */
+    bottom: calc(16px + 56px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ─── Filter bottom sheet (mobile only) ─────────────────────────────────── */
+.filter-sheet-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  z-index: 199;
+}
+.filter-sheet {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  flex-direction: column;
+  background-color: var(--card);
+  border-radius: 16px 16px 0 0;
+  padding: var(--space-4);
+  padding-bottom: max(var(--space-6), env(safe-area-inset-bottom, 0px));
+  max-height: 80dvh;
+  overflow-y: auto;
+  animation: slideInUp 0.22s ease-out;
+}
+@media (max-width: 767px) {
+  .filter-sheet-backdrop { display: block; }
+  .filter-sheet          { display: flex; }
+}
+/* ── iOS auto-zoom prevention ─────────────────────────────────────────────────
+   iOS Safari zooms in when focusing an input with font-size < 16px.
+   Setting font-size to max(16px, <original>) on all interactive fields
+   neutralises the trigger. The viewport maximumScale=1 in layout.tsx is the
+   belt-and-suspenders backstop for PWA (standalone) mode.            ──────── */
+@media (max-width: 1024px) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
+@keyframes activityPanelProgress {
+  from { opacity: 0.6; transform: scaleX(0.3); transform-origin: left; }
+  to   { opacity: 1;   transform: scaleX(1);   transform-origin: left; }
+}
+
+/* Ticket Kanban — thinner scrollbars (board strip + column stacks) */
+.ticket-board-scroll-x {
+  scrollbar-width: thin;
+  scrollbar-color: var(--neutral-300) transparent;
+}
+.ticket-board-scroll-x::-webkit-scrollbar {
+  height: 6px;
+}
+.ticket-board-scroll-y {
+  scrollbar-width: thin;
+  scrollbar-color: var(--neutral-300) transparent;
+}
+.ticket-board-scroll-y::-webkit-scrollbar {
+  width: 6px;
+}
+.ticket-board-scroll-x::-webkit-scrollbar-thumb,
+.ticket-board-scroll-y::-webkit-scrollbar-thumb {
+  background: var(--neutral-300);
+  border-radius: 3px;
+}
+.ticket-board-scroll-x::-webkit-scrollbar-track,
+.ticket-board-scroll-y::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dark .ticket-board-scroll-x,
+.dark .ticket-board-scroll-y {
+  scrollbar-color: var(--neutral-700) transparent;
+}
+.dark .ticket-board-scroll-x::-webkit-scrollbar-thumb,
+.dark .ticket-board-scroll-y::-webkit-scrollbar-thumb {
+  background: var(--neutral-700);
+}

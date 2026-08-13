@@ -1,0 +1,128 @@
+# Sync main → dev after every prod release
+#
+# Squash-merging dev→main creates a commit with no ancestry link back to dev.
+# Without this sync, the next dev→main PR always shows "add/add" conflicts
+# even though the content is identical. Merging main back into dev immediately
+# after each release keeps the histories aligned and prevents that divergence.
+#
+# Trigger: push to main (i.e. a prod release just landed)
+# Action:  open (or update) a PR to merge main into dev, then auto-merge it
+#          if there are no conflicts. If there ARE real conflicts, the PR stays
+#          open for Phil to review — this workflow never force-merges.
+
+name: Sync main → dev
+run-name: "Sync main → dev after prod release by ${{ github.actor }}"
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Open or update sync PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if main is already in dev
+        id: check
+        run: |
+          git fetch origin main dev
+          MAIN_SHA=$(git rev-parse origin/main)
+          # Is main already an ancestor of dev? If so, nothing to do.
+          if git merge-base --is-ancestor origin/main origin/dev; then
+            echo "already_synced=true" >> "$GITHUB_OUTPUT"
+            echo "main is already an ancestor of dev — no sync needed."
+          else
+            echo "already_synced=false" >> "$GITHUB_OUTPUT"
+            echo "main has new commits not yet in dev — sync needed."
+          fi
+
+      - name: Create or update sync PR
+        if: steps.check.outputs.already_synced == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="chore/sync-main-to-dev"
+          MAIN_SHA=$(git rev-parse --short origin/main)
+
+          # Delete stale sync branch if it exists (local + remote)
+          git branch -D "$BRANCH" 2>/dev/null || true
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+
+          # Create sync branch from latest dev, then merge main into it
+          git checkout -b "$BRANCH" origin/dev
+          git merge origin/main --no-edit -m "chore: sync main into dev after release ($MAIN_SHA)"
+
+          git push origin "$BRANCH" --force-with-lease
+
+          # Check if a sync PR already exists
+          EXISTING=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$BRANCH" \
+            --base dev \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing sync PR #$EXISTING"
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base dev \
+              --head "$BRANCH" \
+              --title "chore: sync main → dev after release ($MAIN_SHA)" \
+              --body "$(printf 'Automatic sync after a prod release.\n\nMerges the latest \`main\` commit back into \`dev\` to prevent squash-merge divergence conflicts on future releases.\n\nThis PR was created automatically by the **Sync main → dev** workflow. If there are merge conflicts, resolve them before merging.')"
+          fi
+
+      - name: Auto-merge if conflict-free
+        if: steps.check.outputs.already_synced == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="chore/sync-main-to-dev"
+
+          # Give GitHub a moment to compute mergeability
+          sleep 10
+
+          PR_NUMBER=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$BRANCH" \
+            --base dev \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open sync PR found — nothing to merge."
+            exit 0
+          fi
+
+          MERGEABLE=$(gh pr view "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json mergeable \
+            --jq '.mergeable')
+
+          echo "PR #$PR_NUMBER mergeability: $MERGEABLE"
+
+          if [ "$MERGEABLE" = "MERGEABLE" ]; then
+            gh pr merge "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --merge \
+              --auto \
+              --subject "chore: sync main → dev"
+            echo "Auto-merge enabled on PR #$PR_NUMBER"
+          else
+            echo "PR #$PR_NUMBER has conflicts — leaving open for manual review."
+          fi

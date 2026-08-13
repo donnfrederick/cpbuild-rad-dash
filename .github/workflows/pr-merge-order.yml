@@ -1,0 +1,73 @@
+# Maintains a [N/M] merge-order prefix on every open human-authored PR targeting dev.
+#
+# Triggers:
+#   - PR opened/closed/reopened against dev  → renumber all open PRs
+#   - workflow_dispatch                       → manual re-run from the Actions tab
+#
+# Ordering: oldest PR number first (lower number = merge first).
+# Bot PRs (Dependabot, GitHub Actions, Copilot) are excluded — they can't be
+# retitled via GITHUB_TOKEN anyway.
+#
+# GitHub Actions with GITHUB_TOKEN does NOT re-trigger pull_request events
+# when it edits PR titles, so there is no feedback loop risk.
+
+name: PR Merge Order
+run-name: "PR merge order (${{ github.event_name }}) — ${{ github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number) || 'manual dispatch' }} by ${{ github.actor }}"
+
+on:
+  pull_request:
+    types: [opened, closed, reopened]
+    branches: [dev]
+  workflow_dispatch:
+
+jobs:
+  update-order:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Number open PRs by merge order
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO="${{ github.repository }}"
+
+          # Fetch all open non-bot PRs targeting dev, sorted oldest-first
+          PR_DATA=$(gh pr list \
+            --base dev \
+            --state open \
+            --json number,title,author \
+            --repo "$REPO" \
+            --jq '[.[] | select(
+              .author.login | test("dependabot|github-actions|copilot-swe-agent|copilot-pull-request-reviewer") | not
+            )] | sort_by(.number)')
+
+          TOTAL=$(echo "$PR_DATA" | jq 'length')
+
+          if [[ "$TOTAL" -eq 0 ]]; then
+            echo "No open non-bot PRs targeting dev — nothing to number."
+            exit 0
+          fi
+
+          echo "Found $TOTAL open PR(s) — updating merge order prefixes..."
+
+          for i in $(seq 0 $((TOTAL - 1))); do
+            NUMBER=$(echo "$PR_DATA" | jq -r ".[$i].number")
+            TITLE=$(echo "$PR_DATA"  | jq -r ".[$i].title")
+            RANK=$((i + 1))
+
+            # Strip any existing [mergeOrder N/M] prefix before re-adding
+            CLEAN_TITLE=$(echo "$TITLE" | sed 's/^\[mergeOrder [0-9]*\/[0-9]*\] //')
+            NEW_TITLE="[mergeOrder $RANK/$TOTAL] $CLEAN_TITLE"
+
+            if [[ "$TITLE" == "$NEW_TITLE" ]]; then
+              echo "  PR #$NUMBER already correct — skipping"
+            else
+              echo "  Updating PR #$NUMBER → '$NEW_TITLE'"
+              gh api --method PATCH "/repos/$REPO/pulls/$NUMBER" \
+                -f title="$NEW_TITLE" \
+                --jq '.number | "  ✓ Updated PR #\(.)"'
+            fi
+          done
+
+          echo "Done."

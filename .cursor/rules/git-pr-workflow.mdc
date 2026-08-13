@@ -1,0 +1,156 @@
+# Git & PR Workflow — RadDash
+
+This file is shared with the team. Every contributor follows these rules. AI agents working in this repo must also follow them.
+
+## Branch Naming
+
+| Who | Pattern | Example |
+|-----|---------|---------|
+| Phil (backend / full-stack) | `feat/short-description` or `fix/short-description` | `feat/task-detail-page` |
+| Hannah (design / UI) | `hannah/feature-name` | `hannah/task-board` |
+| RAD devs | `feat/short-description`, `fix/short-description`, `chore/short-description` | `fix/sync-conflict` |
+
+Keep branches focused on one feature or fix. Do not bundle unrelated changes.
+
+## The Golden Rule
+
+**All PRs target `dev`. Never push directly to `main`.** Production releases go through `dev` → `main` via a `release/to-prod` branch.
+
+## Branch Conflict Check — Required Before Starting Any Branch
+
+Before creating a new branch, every agent must:
+
+1. Read `docs/ACTIVE_BRANCHES.md` — scan the "Files owned" column for overlap with files you plan to touch
+2. Cross-reference open PRs: `gh pr list --repo cp-build-dev-ops/rad-dash --state open --json headRefName,title`
+3. If any active branch owns files you plan to touch, surface the conflict before proceeding
+
+## Branch Hygiene — Required Before Every Branch Operation
+
+Run `git status --short` before:
+- Creating a new branch (`git checkout -b`)
+- Switching branches (`git checkout`)
+- Running `git add`
+
+If the working tree is not clean, stash before proceeding.
+
+## Before Every PR — Required Steps
+
+```bash
+git fetch origin
+git rebase origin/dev
+git push --force-with-lease
+
+npm run build   # must pass — no TypeScript errors
+npm run lint    # must pass — 0 errors
+npm run test:unit  # must pass
+```
+
+## PR Checklist
+
+- [ ] Branch is rebased on `dev`
+- [ ] `npm run build` passes
+- [ ] `npm run lint` passes (0 errors)
+- [ ] `npm run test:unit` passes
+- [ ] New code has a matching test file
+- [ ] No secrets committed
+- [ ] PR targets `dev` (not `main`)
+- [ ] `docs/ACTIVE_BRANCHES.md` updated while branch is active
+- [ ] Delete this branch's row from `ACTIVE_BRANCHES.md` when PR merges
+
+## PR Labels
+
+| Label | When to use |
+|-------|------------|
+| `design` | Hannah's UI/UX work |
+| `backend` | API routes, database, auth, server-side logic |
+| `dependencies` | Dependency bumps |
+| `security` | Security fixes or hardening |
+| `chore` | Maintenance, docs, config — no feature change |
+| `task-integration` | Work relating to Command Center → RadDash task integration |
+
+## Merge Authority
+
+**Agents must NOT create a PR until the user explicitly approves it.**
+
+After pushing a branch and passing the quality gate:
+1. Update `docs/ACTIVE_BRANCHES.md` — set status to `pushed, awaiting local verify`
+2. Tell the user and ask: **"Ready for me to open the PR?"**
+
+Phil's explicit trigger phrases (treat as "yes, create the PR"):
+- "create a PR", "open the PR", "go ahead with the PR", "ready for PR", "looks good, PR it", "ship it", "looks good"
+
+## Safe-to-Auto-Merge Conditions (all must be true)
+
+| Condition | How to verify |
+|-----------|--------------|
+| User approved PR creation | Said yes in chat |
+| CI green | All checks `SUCCESS` or `NEUTRAL` |
+| Zero unresolved Copilot threads | Thread check query returns no output |
+| No merge conflicts | `mergeable: MERGEABLE` |
+| PR does NOT touch security-sensitive files | See list below |
+
+### Security-Sensitive Files — Require Phil's Review
+
+- `lib/auth.ts`, `lib/permissions.ts`
+- `prisma/schema.prisma`
+- Any file containing `PERMISSIONS`, `hasPermission`, or `auth()`
+- `.github/workflows/deploy.yml`
+- Any file handling secrets or environment variables
+
+## Copilot Review
+
+Copilot auto-review is configured via a GitHub Repository Ruleset. It reviews all PRs targeting `dev` and `main`. Address all Copilot comments before merging:
+
+- **Critical/security bugs** → fix in code
+- **Style/minor** → log reasoning to skip, resolve the thread
+- **Never skip** security or data integrity issues
+
+## Production Deployment
+
+1. Wait for Phil's explicit approval after dev verification
+2. Create `release/to-prod` from `origin/dev`
+3. Bump version: `npm version patch --no-git-tag-version`
+4. Open PR targeting `main` — use `--merge` (never `--squash`)
+5. After merge, verify health endpoint, print deploy receipt
+
+## Session Start Protocol — Phil's Agent Only
+
+```bash
+# Check pending issues
+gh issue list --repo cp-build-dev-ops/rad-dash \
+  --label "agent-action-required,deploy-failure,conflict" --state open \
+  --json number,title --jq '.[] | "#\(.number): \(.title)"'
+
+# Check open PRs
+gh pr list --repo cp-build-dev-ops/rad-dash --state open \
+  --json number,title,headRefName,baseRefName,isDraft,mergeable \
+  --jq '.[] | "#\(.number) [\(.baseRefName)←\(.headRefName)] \(.title) | mergeable:\(.mergeable)"'
+
+# Check prod deploy
+gh run list --repo cp-build-dev-ops/rad-dash \
+  --workflow deploy.yml --branch main --limit 1 \
+  --json databaseId,status,conclusion,headSha \
+  --jq 'if length == 0 then "prod: no runs" else .[0] | "prod: \(.status)/\(.conclusion) sha:\(.headSha[0:7])" end'
+
+# Check dev deploy
+gh run list --repo cp-build-dev-ops/rad-dash \
+  --workflow deploy.yml --branch dev --limit 1 \
+  --json databaseId,status,conclusion,headSha \
+  --jq 'if length == 0 then "dev: no runs" else .[0] | "dev: \(.status)/\(.conclusion) sha:\(.headSha[0:7])" end'
+
+# Check for approval-needed runs
+gh run list --repo cp-build-dev-ops/rad-dash --limit 20 \
+  --json databaseId,name,conclusion,headBranch,event \
+  --jq '.[] | select(.conclusion == "action_required") | "⚠️ APPROVAL NEEDED: run #\(.databaseId) — \(.name) (branch: \(.headBranch))"'
+```
+
+Read `docs/ACTIVE_BRANCHES.md` and `docs/PENDING_REMINDERS.md` after the above.
+
+## Contributor Agents (RAD dev agents, Hannah's agent)
+
+**Skip the session-start PR queue checks.** Instead:
+1. Read `docs/ACTIVE_BRANCHES.md` to check file ownership conflicts
+2. Load relevant `docs/agent-context/` files
+3. Register your branch in `ACTIVE_BRANCHES.md` before starting work
+4. Follow the PR checklist above
+5. Do NOT merge PRs or run Railway CLI commands — those belong to Phil

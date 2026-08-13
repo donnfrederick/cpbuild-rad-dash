@@ -1,0 +1,43 @@
+# Local PostgreSQL for development. App expects DATABASE_URL pointing at port 55432.
+# Mailpit uses host ports 11025 (SMTP) and 18025 (web UI) to avoid clashing with
+# command-center-reboot Mailpit on 1025/8025 when both stacks run.
+# Usage: docker compose up -d
+# Then: npx prisma migrate deploy && npm run bootstrap:admin (with BOOTSTRAP_* env vars)
+# For invite emails locally without Resend: set SMTP_HOST=127.0.0.1 SMTP_PORT=11025
+# and open http://localhost:18025
+#
+# Image note: we use `pgvector/pgvector:pg16` (Postgres 16 with the pgvector
+# extension pre-installed). Semantic duplicate detection relies on this
+# extension, so the vanilla `postgres:16-alpine` image will not work.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: rad-dash-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rad_dash
+    ports:
+      - "55432:5432"
+    volumes:
+      - rad_dash_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: rad-dash-mailpit
+    ports:
+      - "11025:1025"
+      - "18025:8025"
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+volumes:
+  rad_dash_pgdata:

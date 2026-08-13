@@ -1,0 +1,89 @@
+# Request a Copilot code review for PRs into dev.
+#
+# PRIMARY auto-review mechanism:
+#   A GitHub Repository Ruleset ("Copilot code review") should target `dev` and
+#   `main` with `review_on_push: true`. That ruleset is the canonical way Copilot
+#   gets requested on every PR from any author — it fires natively before any
+#   workflow, and works for all GitHub user tokens (not just GITHUB_TOKEN).
+#   Configure under: Settings → Rules → Rulesets for this repository.
+#
+# WHAT THIS WORKFLOW ADDS ON TOP:
+#   1. Creates the `copilot-reviewed` and `copilot-ci-fix-requested` labels so
+#      the auto-merge workflow and agent rules can reference them.
+#   2. Belt-and-suspenders: explicitly adds Copilot as a reviewer when
+#      security-sensitive or medium-risk paths are touched, in case the ruleset
+#      misses a push (e.g. force-push edge cases).
+#
+# Tiers (used by the agent merge rules in git-pr-workflow.mdc):
+#
+#   Security tier — full Copilot feedback loop required before merge:
+#     lib/auth.ts, lib/permissions.ts, lib/dev-session.ts, proxy.ts,
+#     prisma/schema.prisma, .github/workflows/**
+#
+#   Medium-risk tier — Copilot review fires; agent uses judgment (fix real bugs,
+#     log minor comments to COPILOT_LEARNINGS.md); merge NOT blocked on
+#     zero-thread resolution:
+#     app/api/**, lib/**, prisma/migrations/**, components/**
+#
+# - Skips bot-authored PRs (Copilot SWE agent, Dependabot, GitHub Actions)
+#   to avoid review loops.
+# - Fires on `opened`, `reopened`, `ready_for_review`, and `synchronize`
+#   (when path filter matches).
+
+name: Copilot Review
+run-name: "Copilot review — PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+    branches: [dev]
+    paths:
+      # ── Security tier ────────────────────────────────────────────────────────
+      - 'lib/auth.ts'
+      - 'lib/permissions.ts'
+      - 'lib/dev-session.ts'
+      - 'proxy.ts'
+      - 'prisma/schema.prisma'
+      - '.github/workflows/**'
+      # ── Medium-risk tier ─────────────────────────────────────────────────────
+      - 'app/api/**'
+      - 'lib/**'
+      - 'prisma/migrations/**'
+      - 'components/**'
+
+jobs:
+  request-review:
+    name: Request Copilot Review
+    # Skip bot-authored PRs
+    if: |
+      github.event.pull_request.user.login != 'copilot-swe-agent' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Ensure labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "copilot-reviewed" \
+            --color "0075ca" \
+            --description "Copilot has reviewed this PR; no further auto-review will be triggered" \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+          gh label create "copilot-ci-fix-requested" \
+            --color "e4e669" \
+            --description "Copilot has been asked to fix CI failures on this PR" \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+
+      - name: Request Copilot code review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api \
+            --method POST \
+            "/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers" \
+            -f "reviewers[]=copilot" \
+            || echo "::warning::Could not add Copilot as reviewer — the native ruleset should still handle this automatically."

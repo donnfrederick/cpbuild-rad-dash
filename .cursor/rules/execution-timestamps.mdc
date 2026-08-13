@@ -1,0 +1,34 @@
+# Execution Timestamps
+
+## When to Include Timestamps
+
+Include a `[HH:MM:SS]` timestamp prefix in your chat response **at every meaningful phase boundary** during:
+
+- Any deployment or Railway CLI operation
+- Any CI / GitHub Actions polling loop
+- Any multi-step test run (`npm run build`, `npm run test:*`)
+- Any operation expected to take >10 seconds
+- Any "waiting for..." status update
+- The start and end of every agent session checklist
+
+## Format
+
+Use 12-hour time with AM/PM inline with the action summary:
+
+```
+[4:32:07 PM] Starting deploy to dev — merging PR #42...
+[4:32:51 PM] Deploy workflow run is up — watch in Actions: https://github.com/.../runs/<id>
+[4:45:02 PM] ✅ Deploy receipt — workflow succeeded; health: 200 OK.
+```
+
+## How to Get the Current Time
+
+```bash
+date +"%l:%M:%S %p" | sed 's/^ //'
+```
+
+## What NOT to Timestamp
+
+- Single-file reads or edits
+- Lint passes that complete in <3 seconds
+- Conversational replies with no execution happening

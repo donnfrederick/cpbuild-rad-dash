@@ -1,0 +1,417 @@
+# Deploy to Railway
+#
+# Triggered automatically on pushes to `main` (production) and `dev` (staging).
+# Manual: Actions → Deploy → Run workflow → choose branch (`dev` or `main`).
+# Unit and integration tests must pass before the Railway deployment is triggered.
+#
+# Required secrets:
+#   RAILWAY_TOKEN      – Railway service token (Settings → Tokens)
+#   RAILWAY_SERVICE_ID – Railway service ID for the target environment
+#
+# Optional secrets (used for post-deploy smoke tests):
+#   RAILWAY_DEV_URL    – Deployed dev URL (e.g. https://<rad-dash-dev>.up.railway.app)
+#   RAILWAY_PROD_URL   – Deployed prod URL (e.g. https://<rad-dash-prod>.up.railway.app)
+
+name: Deploy
+run-name: "Deploy → ${{ github.ref_name }} by ${{ github.actor }}"
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Optional explicit production version for main deploys, e.g. 1.1.0"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Manual runs must not deploy feature-branch code to Railway using dev/prod secrets.
+  assert-branch-for-dispatch:
+    name: Gate workflow_dispatch (dev/main only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject workflow_dispatch on unexpected refs
+        run: |
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Push event — gate skipped."
+            exit 0
+          fi
+          case "${{ github.ref }}" in
+            refs/heads/dev|refs/heads/main)
+              echo "workflow_dispatch on ${GITHUB_REF#refs/heads/} — ok"
+              ;;
+            *)
+              echo "::error::Manual Deploy may only run for branches dev or main (ref=${{ github.ref }})."
+              exit 1
+              ;;
+          esac
+
+  unit-tests:
+    name: Unit Tests
+    needs: [assert-branch-for-dispatch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Run unit tests
+        run: npm run test:unit
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test?schema=public"
+          AUTH_SECRET: "ci-test-secret"
+          NEXTAUTH_URL: "http://localhost:3000"
+          VITEST_SILENT_API: "1"
+
+  integration-tests:
+    name: Integration Tests
+    needs: [assert-branch-for-dispatch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test?schema=public"
+          AUTH_SECRET: "ci-test-secret"
+          NEXTAUTH_URL: "http://localhost:3000"
+          VITEST_SILENT_API: "1"
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Next.js build
+        run: npm run build
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test?schema=public"
+          AUTH_SECRET: "ci-test-secret"
+          NEXTAUTH_URL: "http://localhost:3000"
+          SKIP_ENV_VALIDATION: "1"
+          CHECKPOINT_DISABLE: "1"
+
+  deploy:
+    name: Deploy to Railway (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, build]
+    environment: ${{ github.ref_name == 'main' && 'production' || 'dev' }}
+    outputs:
+      release_version: ${{ steps.release-version.outputs.release_version }}
+    # 20 min: Railway build (~4 min) + health check retry window (10 min) + buffer.
+    # Without this cap a hung build would block the runner for hours.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check required secrets
+        run: |
+          MISSING=""
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            MISSING="$MISSING\n  • RAILWAY_TOKEN_PROD / RAILWAY_TOKEN_DEV — environment-scoped Railway project tokens"
+          fi
+          if [ -z "$RAILWAY_SERVICE_ID" ]; then
+            MISSING="$MISSING\n  • RAILWAY_SERVICE_ID — go to Railway → your service → Settings → copy Service ID"
+          fi
+          if [ -z "$DEPLOY_URL" ]; then
+            MISSING="$MISSING\n  • RAILWAY_DEV_URL / RAILWAY_PROD_URL — deployed app URL used by the verify health-check job"
+          fi
+          if [ -n "$MISSING" ]; then
+            echo ""
+            echo "❌ Deploy skipped — missing required GitHub Actions secrets:"
+            printf "$MISSING"
+            echo ""
+            echo ""
+            echo "Add them at: GitHub → Settings → Secrets and variables → Actions → New repository secret"
+            echo ""
+            exit 1
+          fi
+          echo "✓ Railway secrets present — proceeding with deploy"
+        env:
+          RAILWAY_TOKEN: ${{ github.ref_name == 'main' && secrets.RAILWAY_TOKEN_PROD || secrets.RAILWAY_TOKEN_DEV }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          DEPLOY_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+      - name: Set production release version on Railway
+        id: release-version
+        run: |
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "release_version=" >> "$GITHUB_OUTPUT"
+            echo "Dev deploy — release version bump skipped."
+            exit 0
+          fi
+
+          BASE_URL="${DEPLOY_URL%/}"
+          CURRENT_VERSION=""
+          if [ -n "$BASE_URL" ]; then
+            CURRENT_VERSION=$(curl -fsSL "$BASE_URL/api/health" 2>/dev/null | python3 -c "import json, sys; print(json.load(sys.stdin).get('version', ''))" 2>/dev/null || true)
+          fi
+
+          if [ -n "$RELEASE_VERSION_OVERRIDE" ]; then
+            NEXT_VERSION="$RELEASE_VERSION_OVERRIDE"
+            echo "Using explicit release version override: $NEXT_VERSION"
+          else
+            NEXT_VERSION=$(CURRENT_VERSION="$CURRENT_VERSION" python3 - <<'PY'
+          import os
+          import re
+
+          current = os.environ.get("CURRENT_VERSION", "").strip().lstrip("v")
+          match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", current)
+          if not match:
+              print("1.0.1")
+              raise SystemExit
+
+          major, minor, patch = map(int, match.groups())
+          print(f"{major}.{minor}.{patch + 1}")
+          PY
+          )
+            echo "Current production version: ${CURRENT_VERSION:-unknown}"
+            echo "Next production version: $NEXT_VERSION"
+          fi
+
+          if ! printf '%s' "$NEXT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Release version must be semver without a leading v, e.g. 1.0.1 (got '$NEXT_VERSION')"
+            exit 1
+          fi
+
+          railway_variables_set() {
+            local max_attempts=3 attempt=1
+            while [ "$attempt" -le "$max_attempts" ]; do
+              echo "Railway variables set attempt $attempt of $max_attempts: $1"
+              if npx --yes @railway/cli@4 variables set "$1" \
+                --service "$RAILWAY_SERVICE_ID" \
+                --environment production; then
+                return 0
+              fi
+              if [ "$attempt" -eq "$max_attempts" ]; then
+                echo "::error::Railway variables set failed after $max_attempts attempts"
+                return 1
+              fi
+              echo "Waiting 45s before retry..."
+              sleep 45
+              attempt=$((attempt + 1))
+            done
+          }
+
+          railway_variables_set "NEXT_PUBLIC_APP_VERSION=${NEXT_VERSION}"
+          railway_variables_set "APP_VERSION=${NEXT_VERSION}"
+
+          # The Dockerfile build runs `npm run build`, and Next.js reads
+          # npm_package_version from the uploaded build context. Update the
+          # local package metadata before `railway up` packages that context.
+          npm version "$NEXT_VERSION" --no-git-tag-version --allow-same-version
+
+          echo "release_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PROD }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          DEPLOY_URL: ${{ secrets.RAILWAY_PROD_URL }}
+          RELEASE_VERSION_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.release_version || '' }}
+
+      # Set APP_COMMIT as a plain runtime env var on Railway before deploying.
+      # The health endpoint reads it at runtime — no build-baking needed.
+      # This avoids the Next.js build-time NEXT_PUBLIC_* baking issue.
+      - name: Set runtime commit variable on Railway
+        run: |
+          ENVIRONMENT="${{ github.ref_name == 'main' && 'production' || 'dev' }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          railway_variables_set() {
+            local max_attempts=3 attempt=1
+            while [ "$attempt" -le "$max_attempts" ]; do
+              echo "Railway variables set attempt $attempt of $max_attempts: $1"
+              if npx --yes @railway/cli@4 variables set "$1" \
+                --service "$RAILWAY_SERVICE_ID" \
+                --environment "$ENVIRONMENT"; then
+                return 0
+              fi
+              if [ "$attempt" -eq "$max_attempts" ]; then
+                echo "::error::Railway variables set failed after $max_attempts attempts"
+                return 1
+              fi
+              echo "Waiting 45s before retry..."
+              sleep 45
+              attempt=$((attempt + 1))
+            done
+          }
+          railway_variables_set "APP_COMMIT=${SHORT_SHA}"
+        env:
+          RAILWAY_TOKEN: ${{ github.ref_name == 'main' && secrets.RAILWAY_TOKEN_PROD || secrets.RAILWAY_TOKEN_DEV }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          GITHUB_SHA: ${{ github.sha }}
+
+      # continue-on-error: CLI can time out after upload while Railway still deploys.
+      # Verify job is the hard gate (HTTP 200). Secrets check above has no continue-on-error.
+      - name: Deploy to Railway
+        continue-on-error: true
+        run: |
+          echo "Token length: ${#RAILWAY_TOKEN} chars"
+          ENVIRONMENT="${{ github.ref_name == 'main' && 'production' || 'dev' }}"
+          echo "Deploying service $RAILWAY_SERVICE_ID to Railway environment: $ENVIRONMENT"
+          # No --detach: CLI blocks until Railway's build+deploy completes and exits
+          # non-zero if the build fails. This makes Railway build failures visible
+          # in GH Actions instead of silently succeeding while the old container
+          # continues serving the verify health check.
+          #
+          # Retry: the CLI sometimes times out talking to backboard.railway.com after
+          # upload started; the deploy may still succeed on Railway. Retries reduce
+          # false-red workflows without weakening real failure signal (verify still gates).
+          MAX_ATTEMPTS=3
+          attempt=1
+          while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+            echo "Railway CLI attempt $attempt of $MAX_ATTEMPTS"
+            if npx --yes @railway/cli@4 up --service "$RAILWAY_SERVICE_ID" --environment "$ENVIRONMENT"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::Railway CLI failed after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+            echo "Waiting 45s before retry..."
+            sleep 45
+            attempt=$((attempt + 1))
+          done
+        env:
+          RAILWAY_TOKEN: ${{ github.ref_name == 'main' && secrets.RAILWAY_TOKEN_PROD || secrets.RAILWAY_TOKEN_DEV }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+
+  verify:
+    name: Verify Deployment (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    # Hard gate — NO continue-on-error. conclusion=success means HTTP 200 confirmed.
+    # Runs after deploy job finishes; Railway step uses continue-on-error so verify/smoke
+    # still run when the CLI flakes. Missing secrets still fail the deploy job and skip verify.
+    steps:
+      - name: Wait for app to be healthy
+        run: |
+          # Strip trailing slash to avoid double-slash in URL (e.g. BASE_URL/ + /api/health)
+          BASE_URL="${BASE_URL%/}"
+          if [ -z "$BASE_URL" ]; then
+            echo "❌ BASE_URL secret is empty — cannot verify deployment."
+            echo "Set RAILWAY_DEV_URL or RAILWAY_PROD_URL in GitHub Actions secrets."
+            exit 1
+          fi
+          HEALTH_URL="$BASE_URL/api/health"
+          echo "Health check: $HEALTH_URL"
+          for i in $(seq 1 20); do
+            # -L follows redirects; -s suppresses progress; -o captures body; -w captures HTTP code
+            HTTP=$(curl -sL -o /tmp/health.json -w "%{http_code}" "$HEALTH_URL" 2>/dev/null || echo "000")
+            echo "  attempt $i: HTTP $HTTP"
+            if [ "$HTTP" = "200" ]; then
+              echo "✅ DEPLOYED AND HEALTHY"
+              cat /tmp/health.json
+              DEPLOYED_COMMIT=$(python3 -c "import json; print(json.load(open('/tmp/health.json')).get('commit',''))")
+              EXPECTED_COMMIT="${GITHUB_SHA:0:7}"
+              if [ "$DEPLOYED_COMMIT" != "$EXPECTED_COMMIT" ]; then
+                echo "::error::Commit mismatch: deployed=$DEPLOYED_COMMIT expected=$EXPECTED_COMMIT"
+                exit 1
+              fi
+              echo "✅ Commit verified: $DEPLOYED_COMMIT"
+              EXPECTED_VERSION="${{ needs.deploy.outputs.release_version }}"
+              if [ "${{ github.ref_name }}" = "main" ] && [ -n "$EXPECTED_VERSION" ]; then
+                DEPLOYED_VERSION=$(python3 -c "import json; print(json.load(open('/tmp/health.json')).get('version',''))")
+                if [ "$DEPLOYED_VERSION" != "$EXPECTED_VERSION" ]; then
+                  echo "::error::Version mismatch: deployed=$DEPLOYED_VERSION expected=$EXPECTED_VERSION"
+                  exit 1
+                fi
+                echo "✅ Version verified: $DEPLOYED_VERSION"
+              fi
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "❌ Health check timed out after 5 minutes — Railway container did not come up"
+          exit 1
+        env:
+          BASE_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+  smoke-test:
+    name: Smoke Test (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: [deploy, verify]
+    # Non-blocking: Playwright smoke tests are a bonus check. The hard health gate
+    # is the verify job above. Smoke failures here are surfaced in CI logs but
+    # never flip the deploy to failed.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Health check — wait for deployment to be ready
+        id: health
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "BASE_URL not configured — skipping health check"
+            echo "Set RAILWAY_DEV_URL or RAILWAY_PROD_URL in repository secrets."
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Checking $BASE_URL/api/health ..."
+          for i in $(seq 1 20); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/health" || echo "000")
+            echo "  attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+              echo "reachable=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$i" = "20" ]; then
+              echo "⚠️  Health check timed out — RAILWAY_DEV_URL/RAILWAY_PROD_URL may be unreachable from CI."
+              echo "   Update the secret in GitHub → Settings → Secrets and variables → Actions."
+              echo "reachable=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+        env:
+          BASE_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+      - name: Install Playwright
+        run: npm run test:e2e:install
+
+      - name: Smoke E2E tests against deployed environment
+        if: steps.health.outputs.reachable == 'true'
+        run: npx playwright test e2e/smoke.spec.ts --reporter=list
+        env:
+          BASE_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+  # record-timing removed: branch protection on dev/main requires PRs + CI,
+  # so the direct push always fails. The job produced no data and only added
+  # noise to the Actions dashboard. Deploy timing can be read directly from
+  # the GitHub Actions UI (run durations are visible there).

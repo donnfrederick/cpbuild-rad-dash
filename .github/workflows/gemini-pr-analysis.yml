@@ -1,0 +1,144 @@
+name: Gemini Deep PR Analysis
+run-name: "Gemini analysis — PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+
+# Runs on every PR push to dev — complements Copilot's syntax review with
+# domain-aware checks that Copilot consistently misses:
+#   - Zod schemas that are stricter than Prisma/API nullability (optional/null fields)
+#   - Integration test fixtures that assume non-null where the DB or API allows null
+#   - Form or server actions that handle nullable fields but lack focused tests
+#   - Missing imports (e.g. useEffect added to a component but not imported)
+#
+# Requires the GEMINI_API_KEY repository secret to be set.
+# Toggle off by setting the GEMINI_ANALYSIS_ENABLED repository variable to "false".
+#
+# Posts a single comment per PR (updates in place on subsequent pushes).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dev]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  analyze:
+    name: Domain-aware code review
+    runs-on: ubuntu-latest
+    # Gemini analysis is informational — never block a PR or deploy.
+    continue-on-error: true
+    # Skip bot-authored PRs to avoid analysis loops
+    if: |
+      github.event.pull_request.user.login != 'copilot-swe-agent' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'github-actions[bot]' &&
+      vars.GEMINI_ANALYSIS_ENABLED != 'false'
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch PR diff (capped at 12 KB)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr diff "$PR" --repo "$REPO" | head -c 12288 > pr_diff.txt
+          echo "Diff size: $(wc -c < pr_diff.txt) bytes"
+
+      - name: Build Gemini request
+        run: |
+          # Prompt lives in .github/gemini-pr-analysis-prompt.txt so the workflow
+          # YAML stays valid (unindented shell heredoc bodies break YAML block scalars).
+          cp .github/gemini-pr-analysis-prompt.txt prompt.txt
+
+          # Combine prompt + diff into a single JSON request body
+          jq -n \
+            --rawfile prompt prompt.txt \
+            --rawfile diff pr_diff.txt \
+            '{
+              contents: [{
+                parts: [{
+                  text: ($prompt + "\n\n--- PR DIFF ---\n" + $diff)
+                }]
+              }],
+              generationConfig: {
+                temperature: 0.1,
+                maxOutputTokens: 1024
+              }
+            }' > request.json
+
+      - name: Call Gemini API
+        id: gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY is not set — skipping analysis."
+            echo "analysis=_Gemini analysis skipped (API key not configured)._" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d @request.json)
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Gemini API returned HTTP $HTTP_STATUS"
+            cat response.json
+            echo "analysis=_Gemini analysis unavailable (API error $HTTP_STATUS)._" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ANALYSIS=$(jq -r '.candidates[0].content.parts[0].text // "_No response from model._"' response.json)
+
+          # Write to GITHUB_OUTPUT using heredoc delimiter to handle multi-line safely
+          {
+            echo "analysis<<GEMINI_EOF"
+            echo "$ANALYSIS"
+            echo "GEMINI_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post or update analysis comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ANALYSIS: ${{ steps.gemini.outputs.analysis }}
+        run: |
+          MARKER="<!-- gemini-pr-analysis -->"
+
+          # Find existing comment ID (update in place — no comment pile-up)
+          EXISTING_ID=$(gh api \
+            "/repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | startswith(\"$MARKER\"))] | .[0].id // empty")
+
+          # Build comment body via printf (avoids markdown-in-shell quoting issues)
+          BODY=$(printf '%s\n### 🤖 Gemini Domain Analysis\n\n_Focused on nullable fields vs Zod, test gaps, and missing imports — complements Copilot'\''s syntax review._\n\n%s\n\n---\n_Powered by Gemini 2.0 Flash · [workflow](.github/workflows/gemini-pr-analysis.yml)_' \
+            "$MARKER" "$ANALYSIS")
+
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "/repos/$REPO/issues/comments/$EXISTING_ID" \
+              -f body="$BODY" > /dev/null
+            echo "Updated existing Gemini analysis comment #$EXISTING_ID on PR #$PR"
+          else
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+            echo "Posted new Gemini analysis comment on PR #$PR"
+          fi
+
+  # Always-passing gate job — prevents GitHub from marking the workflow as
+  # failed when `analyze` is skipped (e.g. bot-authored PRs). GitHub treats
+  # a workflow with zero completed jobs as a failure, not a skip.
+  done:
+    name: Gemini check complete
+    runs-on: ubuntu-latest
+    needs: [analyze]
+    if: always()
+    steps:
+      - run: echo "Gemini analysis complete (or intentionally skipped)"

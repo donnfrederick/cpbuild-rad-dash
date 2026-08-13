@@ -1,0 +1,46 @@
+# Auto-merge Copilot sub-PRs into their feature branch once CI passes.
+#
+# When the Copilot SWE agent opens a sub-PR (targeting a feature branch, not dev/main),
+# we immediately enable auto-merge so it merges as soon as all required CI checks pass.
+# This removes the manual "merge the Copilot sub-PR" step from the workflow.
+#
+# After the sub-PR merges, copilot-sub-pr-automation.yml fires and:
+#   - Resolves review threads on the parent PR
+#   - Posts a "ready for your review" notification to the PR author
+
+name: Copilot Sub-PR Auto-Merge
+run-name: "Copilot sub-PR auto-merge — PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge on Copilot sub-PR
+    # Only act on sub-PRs created by the Copilot SWE agent that target a
+    # feature branch (not dev or main — those go through normal review).
+    if: |
+      github.event.pull_request.user.login == 'copilot-swe-agent' &&
+      github.event.pull_request.base.ref != 'dev' &&
+      github.event.pull_request.base.ref != 'main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Enable auto-merge (merge commit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          BASE="${{ github.event.pull_request.base.ref }}"
+          echo "Enabling auto-merge on Copilot sub-PR #$PR targeting $BASE"
+          gh pr merge "$PR" \
+            --repo "${{ github.repository }}" \
+            --auto \
+            --merge \
+            && echo "✓ Auto-merge enabled — will merge once CI passes" \
+            || echo "::warning::Could not enable auto-merge on sub-PR #$PR"

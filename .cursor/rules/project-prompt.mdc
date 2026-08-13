@@ -1,0 +1,117 @@
+# RadDash — Agent Entry Point
+
+## Who You Are Helping
+
+This repo is used by three types of contributors. Before doing anything, identify which one you are:
+
+| Who | How to know | What to do |
+|-----|------------|------------|
+| **Phil's agent** | The person you're helping is Phil Amour (`philipamour`) | Run the full session checklist in `git-pr-workflow.mdc` → Session Start Protocol |
+| **RAD dev agent** | The person is a RAD dev team member (not Phil, not Hannah) | Follow the **Contributor Startup** below |
+| **Hannah's agent** | The person is Hannah (design/UI) | Follow the **Contributor Startup** below |
+
+---
+
+## Contributor Startup — Run This Every Session
+
+```bash
+# 1. Check for file ownership conflicts before touching anything
+cat docs/ACTIVE_BRANCHES.md
+
+# 2. Check what's open to avoid duplicating work
+gh pr list --repo cp-build-dev-ops/rad-dash --state open \
+  --json number,title,headRefName,baseRefName \
+  --jq '.[] | "#\(.number) [\(.baseRefName)←\(.headRefName)] \(.title)"'
+
+# 3. Check what branch you're on — never commit to main or dev
+git branch --show-current
+git status --short
+```
+
+Then read:
+- `docs/agent-context/project-overview.md` — what RadDash is, key concepts, integration with Command Center
+- Any `docs/agent-context/` files relevant to the task (architecture, backend-patterns, etc.)
+
+---
+
+## First Time in This Repo? — Do This First
+
+If there is no app code yet (just docs and rules), the team is in **scaffold phase**. Guide the developer through:
+
+1. **Confirm stack decision** — ask "Have you and Phil decided on the tech stack? If yes, which one?" Do not scaffold code until this is confirmed.
+2. **Create a branch for the scaffold**: `git checkout -b feat/initial-scaffold origin/dev`
+3. **Register in ACTIVE_BRANCHES.md** before writing any code
+4. **Scaffold with the confirmed stack** — follow patterns in `docs/agent-context/` once they exist, or align with Command Center patterns (Next.js 16, Prisma, PostgreSQL, Tailwind, Railway)
+
+If the developer mentions "Phil said to use X stack" — proceed with that. Do not second-guess it.
+
+---
+
+## What You Can and Cannot Do
+
+### Contributor agents CAN:
+- Push commits to any `feat/`, `fix/`, `chore/`, or `hannah/` branch
+- Create PRs targeting `dev` — **only after the developer explicitly approves** ("create the PR", "open it", "looks good")
+- Register and update `docs/ACTIVE_BRANCHES.md`
+- Read any file in the codebase
+- Run `npm run build`, `npm run lint`, `npm run test:unit` locally
+
+### Contributor agents CANNOT:
+- Merge PRs (Phil merges)
+- Run Railway CLI commands (`railway deploy`, `railway variables`)
+- Modify `.github/workflows/` files
+- Touch `lib/auth.ts`, `lib/permissions.ts`, `prisma/schema.prisma` without Phil's explicit approval
+- Push directly to `main` or `dev`
+- Commit without passing `npm run build && npm run lint && npm run test:unit`
+
+---
+
+## Pre-Code Checklist (Every Time Before Writing Any Code)
+
+Before writing a single line:
+
+- [ ] `git status --short` is clean — stash anything unrelated
+- [ ] You are on a `feat/`, `fix/`, or `chore/` branch — **not** `main` or `dev`
+- [ ] Branch is registered in `docs/ACTIVE_BRANCHES.md`
+- [ ] No other active branch owns the files you're about to edit (checked `ACTIVE_BRANCHES.md`)
+
+---
+
+## Workflow Summary
+
+```
+Pick up task
+  → git checkout -b feat/<task-slug> origin/dev
+  → Register branch in docs/ACTIVE_BRANCHES.md
+  → Write code + tests
+  → npm run build && npm run lint && npm run test:unit  (must all pass)
+  → git push origin feat/<task-slug>
+  → Update ACTIVE_BRANCHES.md status to "pushed, awaiting local verify"
+  → Tell developer: "Ready — want me to open the PR?"
+  → Developer says yes → gh pr create --base dev
+  → Copilot reviews automatically
+  → Address all Copilot comments (see git-pr-workflow.mdc)
+  → Phil merges to dev → deploys → Phil notifies team to verify
+```
+
+---
+
+## Key Rules — Read These Files
+
+| File | What it covers |
+|------|---------------|
+| `.cursor/rules/git-pr-workflow.mdc` | Full branching and PR workflow, merge authority, Copilot loop |
+| `.cursor/rules/testing.mdc` | What tests are required for every change |
+| `.cursor/rules/project-scope.mdc` | What RadDash is and isn't — read before building anything new |
+| `.cursor/rules/session-context.mdc` | Dev server startup, schema change protocol, auth quick reference |
+| `docs/agent-context/project-overview.md` | Project concepts, integration architecture, team |
+
+---
+
+## When in Doubt
+
+- **Is this feature in scope?** → Read `project-scope.mdc`
+- **Which branch do I target?** → Always `dev`
+- **Should this work offline?** → Ask Phil — RadDash is an internal dashboard, offline support TBD
+- **Does this touch Command Center integration?** → Flag it to Phil before implementing
+- **Do I need a test for this?** → Yes. Always. Read `testing.mdc`.

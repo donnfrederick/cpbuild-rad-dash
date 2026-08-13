@@ -1,0 +1,227 @@
+name: Auto-Merge Ready PRs
+run-name: "Auto-merge check — PR #${{ github.event.pull_request.number || inputs.pr_number }} by ${{ github.actor }}"
+
+# Triggers on PR events targeting dev (opened, new commits, review submitted,
+# or manual dispatch). Evaluates each open non-draft PR and squash-merges it
+# when all safe-to-merge conditions pass.
+#
+# SECURITY NOTE: PRs touching auth, permissions, schema, or production deploy
+# config are never auto-merged. They receive a deduplicated comment requesting
+# Phil's review.
+#
+# Auto-merge applies to:
+#   - Phil's PRs (author: cp-build-dev)
+#   - Dependabot PRs (author matches 'dependabot') — Dependabot auto-merge is
+#     not enabled at the repo level, so these must be handled here.
+# All other authors (contributors, other bots) are skipped.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [dev]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to evaluate for auto-merge"
+        required: true
+        type: string
+
+permissions:
+  pull-requests: write
+  contents: write
+  issues: read
+  checks: read
+
+jobs:
+  evaluate-and-merge:
+    name: Evaluate PR for auto-merge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect open PRs targeting dev
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.pr_number }}" ]; then
+            echo "prs=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          else
+            # Get all open non-draft PRs targeting dev
+            PRS=$(gh pr list \
+              --repo "${{ github.repository }}" \
+              --base dev \
+              --state open \
+              --json number,isDraft,author \
+              --jq '[.[] | select(.isDraft == false) | .number] | join(",")')
+            echo "prs=$PRS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Evaluate and merge each ready PR
+        if: steps.collect.outputs.prs != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Security-sensitive exact paths — never auto-merge if any are changed.
+          # Using fixed strings matched with grep -F to avoid regex interpretation.
+          SECURITY_PATTERNS=(
+            "lib/auth.ts"
+            "lib/permissions.ts"
+            "lib/auth/"
+            "prisma/schema.prisma"
+            "proxy.ts"
+            ".github/workflows/deploy.yml"
+          )
+
+          IFS=',' read -ra PR_LIST <<< "${{ steps.collect.outputs.prs }}"
+
+          for PR in "${PR_LIST[@]}"; do
+            [ -z "$PR" ] && continue
+            echo ""
+            echo "=== Evaluating PR #$PR ==="
+
+            # --- 1. Get PR details (no statusCheckRollup — uses GraphQL fields
+            #        that are inaccessible to GITHUB_TOKEN in workflow context) ---
+            PR_DATA=$(gh pr view "$PR" --repo "$REPO" \
+              --json title,mergeable,headRefName,headRefOid,url,author)
+
+            TITLE=$(echo "$PR_DATA" | jq -r '.title')
+            MERGEABLE=$(echo "$PR_DATA" | jq -r '.mergeable')
+            HEAD_REF=$(echo "$PR_DATA" | jq -r '.headRefName')
+            HEAD_SHA=$(echo "$PR_DATA" | jq -r '.headRefOid')
+            PR_URL=$(echo "$PR_DATA" | jq -r '.url')
+            AUTHOR=$(echo "$PR_DATA" | jq -r '.author.login')
+
+            echo "Title: $TITLE"
+            echo "Branch: $HEAD_REF"
+            echo "Author: $AUTHOR"
+            echo "Mergeable: $MERGEABLE"
+            echo "Head SHA: $HEAD_SHA"
+
+            # Skip non-Dependabot bots (Copilot sub-PRs, GitHub Actions PRs, etc.)
+            # Dependabot PRs are intentionally NOT skipped here — Dependabot auto-merge
+            # is not enabled in this repo, so Dependabot PRs must pass through this
+            # workflow's safety gates (CI green, no security-sensitive files, no
+            # unresolved threads) the same as any other PR.
+            if echo "$AUTHOR" | grep -qiE 'copilot|github-actions'; then
+              echo "⏭️  Skipping — bot-authored PR (non-Dependabot)"
+              continue
+            fi
+
+            # Auto-merge is enabled for Phil's PRs (cp-build-dev) and Dependabot
+            # dependency PRs. Contributor PRs (Hannah, etc.) get Copilot reviews and
+            # CI but Phil merges them manually.
+            IS_DEPENDABOT=$(echo "$AUTHOR" | grep -qiE 'dependabot' && echo "true" || echo "false")
+            PHIL_LOGIN="cp-build-dev"
+            if [ "$AUTHOR" != "$PHIL_LOGIN" ] && [ "$IS_DEPENDABOT" != "true" ]; then
+              echo "👤  PR #$PR is by $AUTHOR (not Phil) — skipping auto-merge, notifying Phil"
+              ALREADY_NOTIFIED=$(gh pr view "$PR" --repo "$REPO" --json comments \
+                --jq '[.comments[].body | select(test("^PR ready for your review"))] | length')
+              if [ "${ALREADY_NOTIFIED:-0}" -eq 0 ]; then
+                CONTRIBUTOR_MSG=$(printf 'PR ready for your review @cp-build-dev\n\nAll CI checks are green and Copilot comments are resolved, but this PR was opened by @%s — auto-merge is intentionally disabled for contributor PRs.\n\nPlease review the changes and merge when you are happy with them.' "$AUTHOR")
+                gh pr comment "$PR" --repo "$REPO" --body "$CONTRIBUTOR_MSG"
+              fi
+              continue
+            fi
+
+            # --- 2. Check mergeability ---
+            if [ "$MERGEABLE" != "MERGEABLE" ]; then
+              echo "⏭️  Not ready — mergeable state: $MERGEABLE"
+              continue
+            fi
+
+            # --- 3. Check all status checks via REST Checks API ---
+            # Avoids the GraphQL statusCheckRollup field which tries to fetch
+            # checkSuite.workflowRun — a field GITHUB_TOKEN cannot access.
+            CHECK_RUNS=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
+              --paginate --jq '.check_runs')
+            CHECK_COUNT=$(echo "$CHECK_RUNS" | jq 'length')
+
+            if [ "$CHECK_COUNT" -eq 0 ]; then
+              echo "⏭️  Not ready — no check runs recorded yet"
+              continue
+            fi
+
+            # Count incomplete or failed checks
+            IN_PROGRESS=$(echo "$CHECK_RUNS" | jq '[.[] | select(.status != "completed")] | length')
+            if [ "$IN_PROGRESS" -gt 0 ]; then
+              echo "⏭️  Not ready — $IN_PROGRESS check(s) still running"
+              continue
+            fi
+
+            FAILED=$(echo "$CHECK_RUNS" | jq \
+              '[.[] | select(.conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
+            echo "Checks: $CHECK_COUNT total, $FAILED failed"
+            if [ "$FAILED" -gt 0 ]; then
+              echo "⏭️  Not ready — $FAILED check(s) not passing"
+              continue
+            fi
+
+            # --- 4. Check for unresolved review threads ---
+            # Request 100 threads. PRs with >100 threads are pathological; we
+            # conservatively block auto-merge if we hit the ceiling.
+            THREAD_DATA=$(gh api graphql -f query='
+              query($owner: String!, $repo: String!, $pr: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pr) {
+                    reviewThreads(first: 100) {
+                      totalCount
+                      nodes { isResolved }
+                    }
+                  }
+                }
+              }' \
+              -f owner="${REPO%%/*}" \
+              -f repo="${REPO##*/}" \
+              -F pr="$PR" 2>/dev/null)
+
+            TOTAL_THREADS=$(echo "$THREAD_DATA" | jq '.data.repository.pullRequest.reviewThreads.totalCount // 0')
+            UNRESOLVED=$(echo "$THREAD_DATA" | jq '.data.repository.pullRequest.reviewThreads.nodes | map(select(.isResolved == false)) | length // 0')
+
+            echo "Review threads — total: $TOTAL_THREADS, unresolved: $UNRESOLVED"
+
+            # Block if we hit the 100-thread ceiling (cannot guarantee all resolved)
+            if [ "$TOTAL_THREADS" -ge 100 ]; then
+              echo "⏭️  Not ready — thread count hit query limit ($TOTAL_THREADS), cannot verify all resolved"
+              continue
+            fi
+
+            if [ "${UNRESOLVED:-0}" -gt 0 ]; then
+              echo "⏭️  Not ready — $UNRESOLVED unresolved review thread(s)"
+              continue
+            fi
+
+            # --- 5. Check for security-sensitive files ---
+            # Use fixed-string matching (-F) to avoid regex interpretation of dots etc.
+            CHANGED_FILES=$(gh pr view "$PR" --repo "$REPO" --json files --jq '[.files[].path] | join("\n")')
+            SECURITY_HIT=""
+            for PATTERN in "${SECURITY_PATTERNS[@]}"; do
+              if echo "$CHANGED_FILES" | grep -Fq "$PATTERN"; then
+                SECURITY_HIT="$PATTERN"
+                break
+              fi
+            done
+
+            if [ -n "$SECURITY_HIT" ]; then
+              echo "⚠️  Security-sensitive file detected: $SECURITY_HIT — notifying Phil"
+              # Deduplicate: only post the security notice once per PR
+              ALREADY_FLAGGED=$(gh pr view "$PR" --repo "$REPO" --json comments \
+                --jq '[.comments[].body | select(test("^Security review required"))] | length')
+              if [ "${ALREADY_FLAGGED:-0}" -eq 0 ]; then
+                SECURITY_MSG=$(printf 'Security review required before merging\n\nAll CI checks pass and review threads are resolved, but this PR touches a security-sensitive file that requires human sign-off: %s\n\nEverything else is ready. Please review and approve to merge.' "$SECURITY_HIT")
+                gh pr comment "$PR" --repo "$REPO" --body "$SECURITY_MSG"
+              fi
+              continue
+            fi
+
+            # --- 6. All conditions met — squash merge ---
+            echo "✅ PR #$PR is ready — merging"
+            if ! gh pr merge "$PR" --repo "$REPO" --squash --auto 2>&1; then
+              echo "auto-merge flag not available (branch protection may not require it) — attempting direct squash merge"
+              if ! gh pr merge "$PR" --repo "$REPO" --squash 2>&1; then
+                echo "ERROR: Could not merge PR #$PR. Manual merge required."
+              fi
+            fi
+
+          done

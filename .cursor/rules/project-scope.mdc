@@ -1,0 +1,47 @@
+# RadDash Project Scope
+
+## What This Is
+
+**RadDash** is the RAD team's internal task management and process control system for CP Build. It is a standalone application with its own database and codebase.
+
+## Core Purpose
+
+- Track tasks that originate from CP Build Command Center feedback items or are created directly
+- Manage the full task lifecycle: backlog → in progress → in review → deployed → verified
+- Track Git branch assignments per task
+- Coordinate code review and design handoff workflows
+- Give Phil visibility into team workload and PR pipeline
+
+## What RadDash Is NOT
+
+- **Not a shared-database app with Command Center** — integration is via API calls only
+- **Not a replacement for GitHub PRs** — it tracks them, not replaces them
+- **Not a public or client-facing tool** — internal team use only
+
+## Integration with Command Center
+
+Command Center pushes feedback items to RadDash via a dedicated API endpoint. No shared database. No direct DB coupling between the two systems.
+
+```
+Command Center → POST /api/integration/tasks (RadDash) → Task created
+```
+
+The Command Center integration endpoint in RadDash must:
+- Require an API key (not a user session)
+- Validate all incoming fields (nullable fields must be handled)
+- Be idempotent (same feedback item can be pushed twice without creating duplicates)
+
+## Roles
+
+| Role | Description |
+|------|-------------|
+| `ADMIN` | Phil — full access, manages deployments and PR merges |
+| `DEVELOPER` | RAD dev team — create tasks, manage branches, submit PRs |
+| `DESIGNER` | Hannah — view tasks, update design-related tasks, submit design PRs |
+
+## What "In Scope" Means for Every Feature
+
+Before building anything, confirm:
+1. Does this task need to exist in RadDash, or is it already covered by GitHub natively?
+2. Is this internal-team-only, or does it need external access?
+3. Does this touch the Command Center integration layer? If yes, coordinate with the Command Center agent.

@@ -1,0 +1,25 @@
+# Path-based PR auto-labeling
+# Docs: https://github.com/actions/labeler
+
+contracts:api:
+  - changed-files:
+    - any-glob-to-any-file: 'app/api/**'
+
+contracts:db:
+  - changed-files:
+    - any-glob-to-any-file: 'prisma/**'
+
+base-pack:
+  - changed-files:
+    - any-glob-to-any-file: 'lib/**'
+
+ui:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'components/**'
+      - 'app/globals.css'
+      - 'public/**'
+
+feature:
+  - changed-files:
+    - any-glob-to-any-file: 'app/[locale]/**'

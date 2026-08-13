@@ -1,0 +1,84 @@
+name: Distill Copilot Learnings
+run-name: "Distill Copilot Learnings — ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}"
+
+# Runs every Monday at 9am UTC and on manual dispatch.
+# Creates a GitHub Issue asking the Cursor agent to review COPILOT_LEARNINGS.md,
+# identify patterns, and propose updates to .cursor/rules/ so recurring issues
+# become proactive checks instead of reactive fixes.
+#
+# The agent should:
+#   1. Read docs/COPILOT_LEARNINGS.md
+#   2. Group entries by category and look for patterns (3+ entries in the same
+#      category = strong signal that a rule should be added or strengthened)
+#   3. Draft a PR that updates .cursor/rules/ and/or project-prompt.mdc
+#   4. Close this issue when the PR is merged
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"  # Every Monday 9am UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  create-distillation-prompt:
+    name: Create learning distillation issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Count recent learnings entries
+        id: count
+        run: |
+          # Count entries added in the last 7 days
+          RECENT=$(grep -c "^### $(date -d '7 days ago' '+%Y')" docs/COPILOT_LEARNINGS.md 2>/dev/null || echo "0")
+          TOTAL=$(grep -c "^### [0-9]" docs/COPILOT_LEARNINGS.md 2>/dev/null || echo "0")
+          echo "recent=$RECENT" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no new entries this week
+        if: steps.count.outputs.recent == '0'
+        run: |
+          echo "No new COPILOT_LEARNINGS entries this week — skipping distillation issue."
+
+      - name: Create distillation issue
+        if: steps.count.outputs.recent != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TOTAL: ${{ steps.count.outputs.total }}
+          RECENT: ${{ steps.count.outputs.recent }}
+        run: |
+          # Check if a distillation issue is already open (avoid duplicates)
+          EXISTING=$(gh issue list \
+            --repo "$REPO" \
+            --label "learning-distillation" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Distillation issue #$EXISTING already open — skipping"
+            exit 0
+          fi
+
+          # Ensure label exists
+          gh label create "learning-distillation" \
+            --color "bfd4f2" \
+            --description "Weekly prompt to distill Copilot learnings into cursor rules" \
+            --repo "$REPO" 2>/dev/null || true
+
+          # Build body via printf into a variable. Multi-line strings with
+          # markdown bold (**) or other YAML-special chars must never appear
+          # as unquoted literals directly in a run: block.
+          BODY=$(printf \
+            'Weekly Copilot Learnings Distillation\n\nNew entries this week: %s\nTotal entries in log: %s\n\nWhat to do\n\n1. Read docs/COPILOT_LEARNINGS.md in full\n2. Group entries by category - look for patterns:\n   - 3+ entries in the same category = strong signal a rule needs adding/strengthening\n   - Same root cause appears twice = add it to the pre-push self-check table\n   - A fix was non-obvious = consider adding an ESLint rule or CI check instead\n3. Draft a PR updating one or more of:\n   - .cursor/rules/git-pr-workflow.mdc\n   - .cursor/rules/project-prompt.mdc\n   - .github/copilot-instructions.md\n   - A new .cursor/rules/ file if a new domain is emerging\n4. Merge the PR (docs/rules PRs are safe to auto-merge per policy)\n5. Update the Distillation History table in COPILOT_LEARNINGS.md\n6. Close this issue\n\nGoal\n\nEvery entry in COPILOT_LEARNINGS.md should eventually become either:\n- A rule agents check before writing code (proactive)\n- A CI/lint check that catches it automatically (automated)\n- Or documented as an acceptable one-off (marked as such in the log)\n\nNothing should stay in the log as a recurring surprise.' \
+            "$RECENT" "$TOTAL")
+
+          gh issue create \
+            --repo "$REPO" \
+            --title "Weekly: distill Copilot learnings into cursor rules" \
+            --body "$BODY" \
+            --label "learning-distillation,agent-action-required"

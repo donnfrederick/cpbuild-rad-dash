@@ -1,0 +1,54 @@
+# Session Startup — RadDash
+
+## Step 1 — Load agent context (always)
+
+Read `docs/agent-context/project-overview.md` first. Then load files relevant to the task:
+
+| Task type | Load these |
+|-----------|-----------|
+| Backend / API route | `architecture.md`, `backend-patterns.md`, `api-endpoints.md` |
+| Database / migration | `database-schema.md`, `backend-patterns.md` |
+| Frontend / component | `frontend-patterns.md`, `architecture.md` |
+| Full-stack feature | All context files |
+| New developer / broad question | All files in `docs/agent-context/` |
+
+These files are the distilled, token-efficient source of truth. They replace scanning raw source files.
+
+## Agent Identity
+
+This repo is worked on by Phil, Hannah, and the RAD dev team — each with their own Cursor agent.
+
+- **Phil's agent**: follow the full session startup in `git-pr-workflow.mdc` (PR queue checks, ACTIVE_BRANCHES, PENDING_REMINDERS). Phil's agent handles merges, Railway deploys, and the full PR lifecycle.
+- **Contributor agents** (RAD dev, Hannah): skip PR queue steps. Read `ACTIVE_BRANCHES.md` for conflicts. Load relevant context files. Follow the contributor workflow in `git-pr-workflow.mdc`. Do not merge PRs or run Railway CLI.
+
+## Multi-step guidance (walkthroughs with Phil)
+
+- Give all remaining steps upfront in one message whenever possible
+- When Phil asks a clarifying question mid-walkthrough, answer it then restate remaining steps
+- Keep step lists short and scannable — one action per line
+
+## Auth / Stack Quick Reference
+
+> **Update this section once the stack is confirmed.**
+
+- Auth: TBD (NextAuth v5 recommended — same as Command Center)
+- Stack: TBD
+- Dev port: TBD (3003 recommended to avoid conflict with Command Center on 3002)
+- Deployment: Railway (dev + prod environments)
+- `DEV_BYPASS_AUTH=true` for local dev once auth is implemented
+
+## After Any `prisma/schema.prisma` Change — Agent Runs the Restart
+
+Whenever the agent edits `prisma/schema.prisma`, it MUST immediately restart the dev server — never ask Phil to do it:
+
+```bash
+npm run dev:kill
+npx prisma generate
+git pull origin dev && npm run dev &
+sleep 8
+curl -s http://localhost:<PORT>/api/health
+```
+
+## Starting the Dev Server — Required Pre-flight
+
+Always `git pull origin dev` first before `npm run dev`. This is unconditional.

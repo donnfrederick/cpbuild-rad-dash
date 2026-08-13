@@ -1,0 +1,7 @@
+-- AlterTable
+ALTER TABLE "sprints" ADD COLUMN     "startDate" TIMESTAMP(3),
+ADD COLUMN "endDate" TIMESTAMP(3),
+ADD COLUMN "maxManSprints" INTEGER,
+ADD COLUMN "daysOff" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN "carryOverPoints" INTEGER,
+ADD COLUMN "pointsPlanned" INTEGER;

@@ -1,0 +1,101 @@
+# Deploy Notifier — Microsoft Teams
+#
+# Posts a Teams card whenever the Deploy workflow completes on dev or main.
+# Success = green card, failure = red card.
+# Requires TEAMS_WEBHOOK_URL secret (Power Automate incoming webhook).
+
+name: Deploy Notifier
+run-name: "Deploy Notifier — ${{ github.event.workflow_run.head_branch }} ${{ github.event.workflow_run.conclusion }}"
+
+on:
+  workflow_run:
+    workflows: ["Deploy"]
+    types: [completed]
+    branches: [dev, main]
+
+permissions:
+  actions: read
+
+jobs:
+  notify:
+    name: Post Teams notification
+    runs-on: ubuntu-latest
+    # A Teams webhook failure must never mark a deploy as failed on the dashboard.
+    continue-on-error: true
+
+    steps:
+      - name: Skip — Teams webhook not configured
+        if: ${{ secrets.TEAMS_WEBHOOK_URL == '' }}
+        run: echo "TEAMS_WEBHOOK_URL is not set — skipping Teams notification."
+
+      - name: Build and send Teams card
+        if: ${{ secrets.TEAMS_WEBHOOK_URL != '' }}
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          SHORT_SHA="${SHA:0:7}"
+
+          if [ "$CONCLUSION" = "success" ]; then
+            ICON="✅"
+            COLOR="Good"
+            STATUS="succeeded"
+          else
+            ICON="🚨"
+            COLOR="Attention"
+            STATUS="FAILED"
+          fi
+
+          TITLE="${ICON} Deploy to ${BRANCH} — ${STATUS}"
+          BODY="Branch: ${BRANCH} | Commit: ${SHORT_SHA} | By: ${ACTOR}"
+
+          jq -n \
+            --arg title "$TITLE" \
+            --arg body  "$BODY" \
+            --arg url   "$RUN_URL" \
+            --arg color "$COLOR" \
+            '{
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "type": "AdaptiveCard",
+                  "$schema": "https://adaptivecards.io/schemas/adaptive-card.json",
+                  "version": "1.4",
+                  "body": [
+                    {
+                      "type": "TextBlock",
+                      "text": $title,
+                      "weight": "Bolder",
+                      "size": "Medium",
+                      "wrap": true,
+                      "style": (if $color == "Good" then "default" else "attention" end)
+                    },
+                    {
+                      "type": "TextBlock",
+                      "text": $body,
+                      "wrap": true,
+                      "spacing": "Small",
+                      "isSubtle": true
+                    }
+                  ],
+                  "actions": [{
+                    "type": "Action.OpenUrl",
+                    "title": "View run",
+                    "url": $url
+                  }]
+                }
+              }]
+            }' > /tmp/teams_payload.json
+
+          http_code=$(curl -s -o /tmp/teams_response.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/teams_payload.json \
+            "$TEAMS_WEBHOOK_URL")
+
+          echo "Teams response: HTTP $http_code"
+          cat /tmp/teams_response.txt || true

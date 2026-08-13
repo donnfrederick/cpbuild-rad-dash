@@ -1,0 +1,787 @@
+// Standalone ticketing app — PostgreSQL via Prisma 7 + adapter-pg at runtime.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Teams ─────────────────────────────────────────────────────────────────────
+
+enum TeamRole {
+  ADMIN
+  MEMBER
+
+  @@map("team_role")
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  slug      String   @unique
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships    TeamMembership[]
+  projects       Project[]
+  sprints        Sprint[]
+  invites        Invite[]
+  inviteTeams    InviteTeam[]
+  ticketTypes    TeamTicketType[]
+  boardStatuses  TeamBoardStatus[]
+  swimlaneConfig TeamSwimlaneConfig?
+
+  @@map("teams")
+}
+
+model TeamMembership {
+  id        String   @id @default(cuid())
+  userId    String
+  teamId    String
+  teamRole  TeamRole @default(MEMBER)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, teamId])
+  @@index([userId])
+  @@index([teamId])
+  @@map("team_memberships")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       User[]
+  invites     Invite[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role        Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission  Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+
+  @@map("user_status")
+}
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  passwordHash  String?
+  roleId        String
+  role          Role       @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  status        UserStatus @default(ACTIVE)
+
+  failedLoginAttempts    Int       @default(0)
+  lockedUntil            DateTime?
+  lastLoginAt            DateTime?
+  passwordResetToken     String?   @unique
+  passwordResetExpiresAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts            Account[]
+  sessions            Session[]
+  specialPermissions  UserSpecialPermission[] @relation("UserPermissions")
+  permissionsGranted  UserSpecialPermission[] @relation("GrantedByUser")
+  teamMemberships     TeamMembership[]
+  ticketsSubmitted    Ticket[]
+  ticketsAssigned     Ticket[]                @relation("TicketAssignee")
+  ticketComments      TicketComment[]         @relation("TicketCommentAuthor")
+  ticketMentions      TicketMention[]         @relation("TicketMentionUser")
+  notifications       Notification[]
+  mediaUploads        MediaAttachment[]       @relation("MediaUploader")
+  mediaMarked         MediaAttachment[]       @relation("MediaMarker")
+  invitesSent         Invite[]                @relation("InviteSender")
+  releaseVerifications ReleaseVerification[]
+  environmentVisits    EnvironmentVisit[]
+  duplicateDismissals  TicketDuplicateDismissal[] @relation("TicketDismissalUser")
+
+  @@index([roleId])
+}
+
+model Invite {
+  id         String    @id @default(cuid())
+  email      String
+  token      String    @unique @default(cuid())
+  roleId     String
+  role       Role      @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  sentBy   User   @relation("InviteSender", fields: [sentById], references: [id], onDelete: Restrict)
+  sentById String
+
+  /// When true, the accepted user receives the access:all_teams special permission (super-admin shortcut).
+  grantAllTeams Boolean @default(false)
+
+  /// Legacy single-team invite (used by team-scoped invite form). New invites use inviteTeams.
+  teamId   String?
+  teamRole TeamRole?
+  team     Team?    @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  inviteTeams InviteTeam[]
+
+  @@index([roleId])
+  @@index([email])
+  @@map("invites")
+}
+
+/// Many-to-many: an invite can enrol the new user in multiple teams at once.
+model InviteTeam {
+  id       String   @id @default(cuid())
+  inviteId String
+  invite   Invite   @relation(fields: [inviteId], references: [id], onDelete: Cascade)
+  teamId   String
+  team     Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamRole TeamRole @default(MEMBER)
+
+  @@unique([inviteId, teamId])
+  @@index([inviteId])
+  @@map("invite_teams")
+}
+
+model UserSpecialPermission {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation("UserPermissions", fields: [userId], references: [id], onDelete: Cascade)
+  permission  String
+  grantedById String?
+  grantedBy   User?    @relation("GrantedByUser", fields: [grantedById], references: [id], onDelete: SetNull)
+  note        String?
+  grantedAt   DateTime @default(now())
+
+  @@unique([userId, permission])
+  @@index([userId])
+  @@map("user_special_permissions")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+/// Per-team board status configuration. Built-in statuses are seeded on team creation;
+/// teams can add custom statuses, rename, reorder, or disable any status.
+model TeamBoardStatus {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  /// Value stored on Ticket.status (e.g. "BACKLOG", "AWAITING_QA"). Immutable after creation.
+  key       String
+  /// Display label shown on the board column (e.g. "Awaiting QA").
+  label     String
+  /// Optional hex colour for the column header (e.g. "#6366f1").
+  color     String?
+  isBuiltIn Boolean  @default(false)
+  isEnabled Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([teamId, key])
+  @@index([teamId])
+  @@map("team_board_statuses")
+}
+
+enum SwimlaneBy {
+  NONE
+  ASSIGNEE
+  TYPE
+  PRIORITY
+  PROJECT
+
+  @@map("swimlane_by")
+}
+
+/// Per-team swimlane grouping preference for the Kanban board.
+model TeamSwimlaneConfig {
+  id         String     @id @default(cuid())
+  teamId     String     @unique
+  team       Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  swimlaneBy SwimlaneBy @default(NONE)
+  updatedAt  DateTime   @updatedAt
+
+  @@map("team_swimlane_configs")
+}
+
+/// Per-team ticket type configuration. Built-in types are seeded on team creation;
+/// teams can add custom types and disable any type.
+model TeamTicketType {
+  id        String   @id @default(cuid())
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  name      String
+  /// Value stored on Ticket.type (e.g. "BUG", "MY_CUSTOM_TYPE"). Immutable after creation.
+  key       String
+  isBuiltIn Boolean  @default(false)
+  isEnabled Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([teamId, key])
+  @@index([teamId])
+  @@map("team_ticket_types")
+}
+
+enum TicketSource {
+  IN_APP
+  MARKER_IO
+  FIELD_TRACKER
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum LinkedPRStatus {
+  OPEN
+  MERGED
+  CLOSED
+}
+
+enum ChecksStatus {
+  PENDING
+  IN_PROGRESS
+  SUCCESS
+  FAILURE
+}
+
+enum PRCommentType {
+  ISSUE_COMMENT
+  REVIEW
+}
+
+/// Per-project GitHub repo + encrypted webhook secret for inbound PR merge events.
+model ProjectGithubConfig {
+  id                     String   @id @default(cuid())
+  projectId              String   @unique
+  project                Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  repoOwner              String
+  repoName               String
+  webhookSecretEncrypted String
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([repoOwner, repoName])
+  @@map("project_github_configs")
+}
+
+model TicketLinkedPR {
+  id           String         @id @default(cuid())
+  ticketId     String
+  ticket       Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  repoOwner    String
+  repoName     String
+  prNumber     Int
+  prUrl        String
+  prTitle      String?
+  status       LinkedPRStatus @default(OPEN)
+  checksStatus ChecksStatus   @default(PENDING)
+  createdAt    DateTime       @default(now())
+
+  comments TicketLinkedPRComment[]
+
+  @@unique([ticketId, repoOwner, repoName, prNumber])
+  @@index([repoOwner, repoName, prNumber])
+  @@map("ticket_linked_prs")
+}
+
+model TicketLinkedPRComment {
+  id              String         @id @default(cuid())
+  linkedPRId      String
+  linkedPR        TicketLinkedPR @relation(fields: [linkedPRId], references: [id], onDelete: Cascade)
+  /// GitHub's numeric comment id. Stored as BigInt because GitHub ids can exceed 2^31.
+  githubCommentId BigInt
+  commentType     PRCommentType
+  authorLogin     String
+  authorAvatarUrl String?
+  body            String
+  htmlUrl         String
+  /// For REVIEW comments: "approved" | "changes_requested" | "commented" | "dismissed".
+  reviewState     String?
+  postedAt        DateTime
+  updatedAt       DateTime       @updatedAt
+
+  @@unique([linkedPRId, githubCommentId, commentType])
+  @@index([linkedPRId, postedAt])
+  @@map("ticket_linked_pr_comments")
+}
+
+model Project {
+  id                     String   @id @default(cuid())
+  name                   String   @unique
+  description            String?  @db.Text
+  /// Unique key prefix for human refs (e.g. RAD, ENG). Shown as PREFIX-0001.
+  ticketKeyPrefix        String   @unique
+  commandCenterProjectId String?
+  teamId                 String
+  team                   Team     @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  tickets        Ticket[]
+  sprintProjects SprintProject[]
+  githubConfig   ProjectGithubConfig?
+
+  @@index([teamId])
+  @@map("projects")
+}
+
+/// Cross-project sprint: tickets shown on the board are those whose `projectId` is in linked projects.
+model Sprint {
+  id        String   @id @default(cuid())
+  name      String
+  teamId    String
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Sprint window (optional planning dates).
+  startDate DateTime?
+  endDate   DateTime?
+
+  /// Planning / capacity fields (optional).
+  maxManSprints   Int?
+  daysOff         Int @default(0)
+  carryOverPoints Int?
+  pointsPlanned   Int?
+
+  /// Free-form sprint goals (optional).
+  goals String? @db.Text
+
+  /// Set when the sprint is formally completed; null means still running.
+  completedAt DateTime?
+  /// Sum of story points for DONE tickets at completion time (frozen).
+  velocity Int?
+
+  projects           SprintProject[]
+  sprintTickets        SprintTicket[]
+  boardTicketOrders    SprintBoardTicketOrder[]
+
+  @@index([teamId])
+  @@index([teamId, completedAt])
+  @@map("sprints")
+}
+
+/// Manual card order within a sprint board column (per status key).
+model SprintBoardTicketOrder {
+  sprintId  String
+  statusKey String
+  ticketId  String
+  position  Int
+  sprint    Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  ticket    Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@id([sprintId, statusKey, ticketId])
+  @@index([sprintId, statusKey])
+  @@map("sprint_board_ticket_orders")
+}
+
+/// When non-empty, the sprint board lists only these tickets (subset of linked projects).
+/// When empty, all tickets from linked projects are shown (legacy behavior).
+model SprintTicket {
+  sprintId String
+  ticketId String
+  sprint   Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  /// True when this row was created by completing a prior sprint (carryover).
+  isCarriedOver Boolean @default(false)
+
+  @@id([sprintId, ticketId])
+  @@index([ticketId])
+  @@map("sprint_tickets")
+}
+
+model SprintProject {
+  sprintId  String
+  projectId String
+  sprint    Sprint  @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([sprintId, projectId])
+  @@index([projectId])
+  @@map("sprint_projects")
+}
+
+/// Per-scope counter for the next `ticketKeyNumber` (see `Ticket.ticketScopeKey`).
+model TicketKeyCounter {
+  scopeKey   String @id
+  lastNumber Int    @default(0)
+
+  @@map("ticket_key_counters")
+}
+
+/// Normalized label name (lowercase) for deduplication.
+model Tag {
+  id      String   @id @default(cuid())
+  name    String   @unique
+  tickets Ticket[]
+
+  @@map("tags")
+}
+
+/// Operational / project ticket (ported from Command Center FeedbackReport).
+model Ticket {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  assigneeId String?
+  assignee   User?   @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  /// Optional parent ticket for hierarchy (distinct from duplicate-of canonical).
+  parentId String?
+  parent   Ticket?  @relation("TicketParent", fields: [parentId], references: [id], onDelete: SetNull)
+  children Ticket[] @relation("TicketParent")
+
+  /// Legacy global id — retained for autoincrement; list/detail use per-scope `ref` (ticketKeyNumber + project prefix or UN-).
+  shortId Int @default(autoincrement()) @unique
+
+  /// Display key scope: `projectId` when assigned, or a fixed sentinel for unassigned (see `UNASSIGNED_TICKET_SCOPE` in `lib/ticket-scopes.ts`).
+  ticketScopeKey  String
+  /// Sequential per scope, starts at 1 (displayed with project prefix or UN-).
+  ticketKeyNumber Int
+
+  /// Stored value matching TeamTicketType.key for the ticket's team (e.g. "BUG", "CUSTOM_TYPE").
+  type        String
+  title       String
+  description String     @db.Text
+
+  screenshot String? @db.Text
+  videoUrl   String?
+  pageUrl    String?
+
+  /// Stored value matching TeamBoardStatus.key for the ticket's team (e.g. "BACKLOG", "AWAITING_QA").
+  status   String          @default("BACKLOG")
+  priority TicketPriority?
+
+  source      TicketSource @default(IN_APP)
+  adminNote   String?      @db.Text
+  /// Originating environment when source = FIELD_TRACKER. One of "dev" | "prod".
+  environment String?
+  /// Original item ID from Field Tracker (feedbackItem.id). Set only when source = FIELD_TRACKER.
+  fieldTrackerItemId String?
+
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  storyPoints Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tags Tag[]
+
+  notifications Notification[]
+  comments      TicketComment[]
+  mentions      TicketMention[]
+  attachments   MediaAttachment[]
+  sprintTickets SprintTicket[]
+  boardOrders   SprintBoardTicketOrder[]
+
+  /// Canonical side: duplicates linked to this ticket
+  canonicalDuplicates TicketDuplicate[] @relation("TicketCanonicalDuplicates")
+  /// Set when this ticket is marked as a duplicate of another (hidden from main inbox)
+  duplicateOf         TicketDuplicate?  @relation("TicketDuplicateOf")
+
+  /// Sorted-pair duplicate dismissals ("keep separate" decisions).
+  duplicateDismissalsA TicketDuplicateDismissal[] @relation("TicketDismissalA")
+  duplicateDismissalsB TicketDuplicateDismissal[] @relation("TicketDismissalB")
+
+  linkedPRs TicketLinkedPR[]
+
+  /// Semantic embedding of title + description (pgvector, 768 dims from Google gemini-embedding-001).
+  /// Stored and queried via raw SQL; Prisma sees it as an opaque column.
+  embedding Unsupported("vector(768)")?
+
+  @@map("tickets")
+  @@index([userId])
+  @@index([assigneeId])
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt])
+  @@index([source])
+  @@index([fieldTrackerItemId])
+  @@index([projectId])
+  @@index([parentId])
+  @@index([ticketScopeKey])
+  @@unique([ticketScopeKey, ticketKeyNumber])
+}
+
+model TicketComment {
+  id        String  @id @default(cuid())
+  ticketId  String
+  ticket    Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User    @relation("TicketCommentAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  body      String  @db.Text
+  editedAt  DateTime?
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  attachments      MediaAttachment[]
+  mentionsAsSource TicketMention[]   @relation("TicketMentionSourceComment")
+
+  @@index([ticketId])
+  @@map("ticket_comments")
+}
+
+model TicketMention {
+  id              String         @id @default(cuid())
+  ticketId        String
+  ticket          Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  mentionedUserId String
+  mentionedUser   User           @relation("TicketMentionUser", fields: [mentionedUserId], references: [id], onDelete: Cascade)
+  sourceCommentId String?
+  sourceComment   TicketComment? @relation("TicketMentionSourceComment", fields: [sourceCommentId], references: [id], onDelete: SetNull)
+  createdAt       DateTime       @default(now())
+
+  @@unique([ticketId, mentionedUserId])
+  @@index([mentionedUserId])
+  @@map("ticket_mentions")
+}
+
+/// Links a duplicate ticket to its canonical primary ticket.
+model TicketDuplicate {
+  id          String @id @default(cuid())
+  canonicalId String
+  canonical   Ticket @relation("TicketCanonicalDuplicates", fields: [canonicalId], references: [id], onDelete: Cascade)
+  duplicateId String @unique
+  duplicate   Ticket @relation("TicketDuplicateOf", fields: [duplicateId], references: [id], onDelete: Cascade)
+  /// Cosine similarity (0–1) captured at link time. Nullable for rows created
+  /// before similarity was persisted.
+  similarity  Float?
+  createdAt   DateTime @default(now())
+
+  @@index([canonicalId])
+  @@map("ticket_duplicates")
+}
+
+/// User decision to "keep separate" a pair of tickets so they don't resurface
+/// in duplicate suggestions. The pair is always stored sorted by the ticket id
+/// (ticketAId < ticketBId) so a single row covers both directions.
+model TicketDuplicateDismissal {
+  id            String   @id @default(cuid())
+  ticketAId     String
+  ticketA       Ticket   @relation("TicketDismissalA", fields: [ticketAId], references: [id], onDelete: Cascade)
+  ticketBId     String
+  ticketB       Ticket   @relation("TicketDismissalB", fields: [ticketBId], references: [id], onDelete: Cascade)
+  dismissedById String?
+  dismissedBy   User?    @relation("TicketDismissalUser", fields: [dismissedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+
+  @@unique([ticketAId, ticketBId])
+  @@index([ticketBId])
+  @@map("ticket_duplicate_dismissals")
+}
+
+enum NotificationType {
+  TICKET_IN_PROGRESS
+  TICKET_RESOLVED
+  TICKET_ASSIGNED
+  MENTIONED_IN_COMMENT
+}
+
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ticketId String?
+  ticket   Ticket? @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  actorId          String?
+  actorName        String?
+  mentionCommentId String?
+
+  type      NotificationType
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@map("notifications")
+  @@index([userId])
+  @@index([userId, read])
+  @@index([ticketId])
+}
+
+/// Attachments on tickets or ticket comments stored in Supabase Storage (field-media bucket).
+/// Polymorphic: exactly one of ticketId / ticketCommentId is non-null (enforced at API layer).
+model MediaAttachment {
+  id            String @id @default(cuid())
+  storageKey    String
+  storageUrl    String
+  mimeType      String
+  fileSizeBytes Int?
+  caption       String? @db.Text
+
+  /// Direct ticket attachment (field-media/tickets/...)
+  ticketId      String?
+  ticket        Ticket?        @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  /// Comment attachment (field-media/ticket-comments/...)
+  ticketCommentId String?
+  ticketComment   TicketComment? @relation(fields: [ticketCommentId], references: [id], onDelete: Cascade)
+
+  uploadedById String
+  uploadedBy   User   @relation("MediaUploader", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  /// Non-destructive vector markup (JSON, schema v2). Only set for images.
+  imageAnnotation Json?
+  lastMarkedById  String?
+  lastMarkedBy    User?     @relation("MediaMarker", fields: [lastMarkedById], references: [id], onDelete: SetNull)
+  lastMarkedAt    DateTime?
+
+  @@index([ticketCommentId])
+  @@index([ticketId])
+  @@map("media_attachments")
+}
+
+// ── DevTools: Release tracking ────────────────────────────────────────────────
+
+model Release {
+  id          String   @id @default(cuid())
+  title       String
+  prNumber    Int?
+  branch      String?
+  /// Which environment this release targets: "development" | "staging" | "production" | "all"
+  environment String   @default("all")
+  mergedAt    DateTime
+  /// JSON array of ReleaseChange: { id: string, description: string, route?: string, category?: string }
+  changes           Json @default("[]")
+  /// JSON array of VerificationStep: generated QA checklist
+  verificationSteps Json @default("[]")
+  createdAt         DateTime @default(now())
+
+  verifications ReleaseVerification[]
+
+  @@map("releases")
+  @@index([mergedAt])
+  @@index([environment])
+}
+
+model ReleaseVerification {
+  id          String   @id @default(cuid())
+  releaseId   String
+  release     Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  environment String
+  verifiedAt  DateTime @default(now())
+  notes       String?
+
+  @@unique([releaseId, userId, environment])
+  @@map("release_verifications")
+  @@index([userId, environment])
+}
+
+/// Tracks the last time a user visited a given environment (for Release Checklist "new since your last visit").
+model EnvironmentVisit {
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  environment   String
+  lastVisitedAt DateTime @default(now())
+
+  @@id([userId, environment])
+  @@map("environment_visits")
+}
+
+// ── DevTools: Layout QA issues ────────────────────────────────────────────────
+
+enum LayoutIssueStatus {
+  OPEN
+  FIXED
+
+  @@map("layout_issue_status")
+}
+
+model LayoutIssue {
+  id          String            @id @default(cuid())
+  description String            @db.Text
+  device      String
+  platform    String
+  route       String
+  screenshot  String?           @db.Text
+  status      LayoutIssueStatus @default(OPEN)
+  fixNote     String?           @db.Text
+  fixedAt     DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@map("layout_issues")
+}

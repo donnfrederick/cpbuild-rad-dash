@@ -1,0 +1,127 @@
+# When a Copilot sub-PR is merged into a feature branch:
+# 1. Resolve all review threads on the parent PR (so it becomes mergeable)
+# 2. Close redundant Copilot sub-PRs targeting the same base
+#
+# Requires: .github/copilot-instructions.md asks Copilot to create a single PR.
+# Optional: Disable "Require conversation resolution" in branch protection for faster merges without this.
+
+name: Copilot sub-PR automation
+run-name: "Copilot sub-PR cleanup — PR #${{ github.event.pull_request.number }} merged into ${{ github.event.pull_request.base.ref }}"
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  on-copilot-merge:
+    if: github.event.pull_request.merged == true && github.event.pull_request.user.login == 'copilot-swe-agent'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Get merged PR info
+        id: merged
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          echo "base_ref=$BASE_REF" >> $GITHUB_OUTPUT
+          echo "Merged Copilot PR #${{ github.event.pull_request.number }} into $BASE_REF"
+
+      - name: Find parent PR
+        id: parent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE_REF="${{ steps.merged.outputs.base_ref }}"
+          # Skip if Copilot merged into dev/main (no parent PR)
+          if [[ "$BASE_REF" == "dev" || "$BASE_REF" == "main" ]]; then
+            echo "parent_number=" >> $GITHUB_OUTPUT
+            echo "No parent PR (base is $BASE_REF)"
+            exit 0
+          fi
+          # Find PR where head = base_ref and base = dev
+          PARENT=$(gh pr list --base dev --head "$BASE_REF" --state open --json number --jq '.[0].number // empty')
+          if [[ -z "$PARENT" ]]; then
+            PARENT=$(gh pr list --base main --head "$BASE_REF" --state open --json number --jq '.[0].number // empty')
+          fi
+          echo "parent_number=$PARENT" >> $GITHUB_OUTPUT
+          echo "Parent PR: $PARENT"
+
+      - name: Resolve review threads on parent PR
+        if: steps.parent.outputs.parent_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PARENT="${{ steps.parent.outputs.parent_number }}"
+          REPO="${{ github.repository }}"
+          OWNER="${REPO%%/*}"
+          NAME="${REPO#*/}"
+          # Get unresolved thread IDs via GraphQL
+          THREADS=$(gh api graphql -f query='
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  reviewThreads(first: 100) {
+                    nodes { id isCollapsed }
+                  }
+                }
+              }
+            }
+          ' -f owner="$OWNER" -f name="$NAME" -F number="$PARENT" --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isCollapsed == false) | .id' | tr '\n' ' ')
+          if [[ -z "$THREADS" ]]; then
+            echo "No unresolved threads"
+            exit 0
+          fi
+          for TID in $THREADS; do
+            [[ -z "$TID" ]] && continue
+            echo "Resolving thread $TID"
+            gh api graphql -f query='
+              mutation($threadId: ID!) {
+                resolveReviewThread(input: { threadId: $threadId }) {
+                  thread { id }
+                }
+              }
+            ' -f threadId="$TID"
+          done
+          echo "Resolved all threads"
+
+      - name: Close redundant Copilot sub-PRs
+        if: steps.parent.outputs.parent_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE_REF="${{ steps.merged.outputs.base_ref }}"
+          MERGED_PR="${{ github.event.pull_request.number }}"
+          # List open PRs from copilot-swe-agent targeting base_ref
+          for pr in $(gh pr list --base "$BASE_REF" --author copilot-swe-agent --state open --json number --jq '.[].number'); do
+            if [[ "$pr" != "$MERGED_PR" ]]; then
+              echo "Closing redundant Copilot PR #$pr"
+              gh pr close "$pr" -c "Closed by automation: changes superseded by merged Copilot PR #$MERGED_PR"
+            fi
+          done
+
+      - name: Notify author the PR is ready for review
+        if: steps.parent.outputs.parent_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PARENT="${{ steps.parent.outputs.parent_number }}"
+          REPO="${{ github.repository }}"
+
+          # Fetch author and actual base branch dynamically (may be dev or main)
+          PR_DATA=$(gh pr view "$PARENT" --repo "$REPO" --json author,baseRefName)
+          AUTHOR=$(echo "$PR_DATA" | jq -r '.author.login')
+          BASE_BRANCH=$(echo "$PR_DATA" | jq -r '.baseRefName')
+
+          # Idempotency guard — skip if we already posted a ready notification
+          ALREADY_NOTIFIED=$(gh pr view "$PARENT" --repo "$REPO" --json comments \
+            --jq '.comments[].body | select(contains("Copilot suggestions applied"))' | head -1)
+          if [[ -n "$ALREADY_NOTIFIED" ]]; then
+            echo "Already posted ready notification — skipping"
+            exit 0
+          fi
+
+          gh pr comment "$PARENT" \
+            --repo "$REPO" \
+            --body "✅ **Copilot suggestions applied.** All review threads have been resolved. CI is re-running — once checks go green, @${AUTHOR} this PR is ready for your review and merge to \`${BASE_BRANCH}\`."

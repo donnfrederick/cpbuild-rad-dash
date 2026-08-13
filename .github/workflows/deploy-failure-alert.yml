@@ -1,0 +1,132 @@
+# Deploy Failure Alert
+#
+# Fires whenever the Deploy workflow completes with a failure on `dev` or `main`.
+# Opens a GitHub issue labelled `deploy-failure` so the next agent session picks it up.
+# Also posts a comment on the commit that triggered the failed deploy.
+#
+# Security note: user-controlled values (commit messages, branch names, actor logins)
+# are passed via environment variables — never interpolated directly into run scripts —
+# to prevent script injection attacks.
+
+name: Deploy Failure Alert
+run-name: "Deploy Failure Alert — ${{ github.event.workflow_run.conclusion == 'success' && 'deploy OK, no alert needed' || github.event.workflow_run.conclusion == 'failure' && 'FAILED' || format('conclusion: {0}', github.event.workflow_run.conclusion) }}"
+
+on:
+  workflow_run:
+    workflows: ["Deploy"]
+    types: [completed]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  alert:
+    name: Open failure issue
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+
+    steps:
+      - name: Collect context
+        id: ctx
+        env:
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message }}
+        run: |
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${COMMIT:0:7}" >> "$GITHUB_OUTPUT"
+          echo "run_url=$RUN_URL" >> "$GITHUB_OUTPUT"
+          echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
+          FIRST_LINE=$(printf '%s' "$COMMIT_MSG" | head -1)
+          echo "commit_msg=$FIRST_LINE" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing open deploy-failure issue
+        id: existing
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+        with:
+          script: |
+            const branch = process.env.BRANCH;
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'deploy-failure',
+              state: 'open',
+            });
+            const match = issues.data.find(i => i.title.includes(branch));
+            return match ? match.number : 0;
+          result-encoding: string
+
+      - name: Open new deploy-failure issue
+        if: ${{ steps.existing.outputs.result == '0' }}
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          COMMIT: ${{ steps.ctx.outputs.commit }}
+          SHORT_SHA: ${{ steps.ctx.outputs.short_sha }}
+          RUN_URL: ${{ steps.ctx.outputs.run_url }}
+          ACTOR: ${{ steps.ctx.outputs.actor }}
+          COMMIT_MSG: ${{ steps.ctx.outputs.commit_msg }}
+        with:
+          script: |
+            const { BRANCH, COMMIT, SHORT_SHA, RUN_URL, ACTOR, COMMIT_MSG } = process.env;
+            const serverUrl = context.serverUrl;
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+
+            const body = [
+              `## Deploy failed on \`${BRANCH}\``,
+              ``,
+              `| | |`,
+              `|---|---|`,
+              `| **Branch** | \`${BRANCH}\` |`,
+              `| **Commit** | [\`${SHORT_SHA}\`](${serverUrl}/${repo}/commit/${COMMIT}) |`,
+              `| **Message** | ${COMMIT_MSG} |`,
+              `| **Triggered by** | @${ACTOR} |`,
+              `| **Failed run** | [View logs](${RUN_URL}) |`,
+              ``,
+              `## Common causes`,
+              ``,
+              `- \`RAILWAY_TOKEN\` is invalid or expired → regenerate at Railway → Account Settings → Tokens`,
+              `- \`RAILWAY_SERVICE_ID\` is wrong → check Railway → service → Settings → Service ID`,
+              `- Build error in the app → check the [run logs](${RUN_URL})`,
+              `- Test failure blocking deploy → fix failing tests and re-push`,
+              ``,
+              `## Agent: resolve this before starting new work`,
+              ``,
+              `1. Open the [failed run logs](${RUN_URL}) and identify the failing step`,
+              `2. Fix the root cause (see common causes above)`,
+              `3. Re-push to \`${BRANCH}\` or update the relevant GitHub secret`,
+              `4. Close this issue once the deploy succeeds`,
+              `5. Update \`AGENT_COLLAB.md\` noting what was fixed`,
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 Deploy failed on \`${BRANCH}\` (${SHORT_SHA})`,
+              body,
+              labels: ['deploy-failure'],
+            });
+
+      - name: Comment on existing open issue
+        if: ${{ steps.existing.outputs.result != '0' }}
+        uses: actions/github-script@v7
+        env:
+          SHORT_SHA: ${{ steps.ctx.outputs.short_sha }}
+          RUN_URL: ${{ steps.ctx.outputs.run_url }}
+          BRANCH: ${{ steps.ctx.outputs.branch }}
+          ISSUE_NUMBER: ${{ steps.existing.outputs.result }}
+        with:
+          script: |
+            const { SHORT_SHA, RUN_URL, BRANCH, ISSUE_NUMBER } = process.env;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt(ISSUE_NUMBER, 10),
+              body: `Another failure on \`${BRANCH}\` — [run logs](${RUN_URL}) — commit \`${SHORT_SHA}\``,
+            });

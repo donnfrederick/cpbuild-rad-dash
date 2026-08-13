@@ -1,0 +1,16 @@
+# RadDash — Code Owners
+# These owners are automatically requested for review when their paths are changed.
+
+# Phil owns everything by default
+* @philipamour
+
+# Design / UI — Hannah co-owns
+/components/ @philipamour
+/app/**/page.tsx @philipamour
+/app/**/layout.tsx @philipamour
+
+# Security-sensitive — Phil must review
+/lib/auth.ts @philipamour
+/lib/permissions.ts @philipamour
+/prisma/schema.prisma @philipamour
+/.github/workflows/ @philipamour

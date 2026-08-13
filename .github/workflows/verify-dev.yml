@@ -1,0 +1,54 @@
+# Verify Development Environment
+#
+# Manually trigger to run full verification against the deployed dev environment.
+# Requires: RAILWAY_DEV_URL, and optionally E2E_TEST_EMAIL, E2E_TEST_PASSWORD in repo secrets.
+#
+# Usage: Actions → Verify Dev → Run workflow
+
+name: Verify Dev
+run-name: "Verify Dev — manual by ${{ github.actor }}"
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+env:
+  CHECKPOINT_DISABLE: "1"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Run unit + integration tests
+        run: npm run test
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test?schema=public"
+          AUTH_SECRET: "ci-test-secret"
+          NEXTAUTH_URL: "http://localhost:3000"
+          VITEST_SILENT_API: "1"
+
+      - name: Install Playwright
+        run: npm run test:e2e:install
+
+      - name: Smoke E2E against dev
+        run: npx playwright test e2e/smoke.spec.ts --reporter=list
+        env:
+          BASE_URL: ${{ secrets.RAILWAY_DEV_URL }}
+
+      - name: Authenticated E2E against dev
+        run: npx playwright test e2e/authenticated.spec.ts --reporter=list
+        env:
+          BASE_URL: ${{ secrets.RAILWAY_DEV_URL }}
+          E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          E2E_TEST_PASSWORD: ${{ secrets.E2E_TEST_PASSWORD }}

@@ -1,0 +1,87 @@
+# When dev is updated, automatically rebase all open human-authored PRs targeting dev
+# so they never fall behind and nobody has to manually sync their branch.
+#
+# Bot PRs are excluded — Dependabot and Copilot manage their own branch updates.
+# No checkout step is needed: all operations use the gh CLI against the GitHub API.
+#
+# ⚠️  KNOWN LIMITATION: gh pr update-branch --rebase creates a new commit SHA on
+# the PR branch. GitHub requires CI to pass for the current HEAD SHA, so any
+# previously passing CI run becomes invalid. The PR will show lint-and-test as
+# "Waiting for status to be reported" until CI runs again on the new SHA.
+# Fix: push an empty commit to the PR branch to retrigger CI, or re-run the
+# workflow manually from the Actions tab. See docs/GITHUB_CI_MAINTENANCE.md.
+
+name: Auto-update PRs on dev push
+run-name: "Auto-update PRs — push to ${{ github.ref_name }} by ${{ github.actor }}"
+
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  update-prs:
+    # Skip if the push was made by a bot to prevent feedback loops.
+    # e.g. if a bot merges into dev, we don't want to re-trigger ourselves.
+    if: ${{ !contains(fromJSON('["dependabot[bot]","github-actions[bot]","copilot-swe-agent","copilot-pull-request-reviewer"]'), github.actor) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Rebase all open non-bot PRs targeting dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "Actor: $ACTOR — fetching open PRs targeting dev..."
+
+          # Exclude all known bot accounts from auto-rebasing
+          PRS=$(gh pr list \
+            --base dev \
+            --state open \
+            --json number,author \
+            --repo "$REPO" \
+            --jq '[.[] | select((.author.login // "") | test("^(dependabot\\[bot\\]|github-actions\\[bot\\]|copilot-swe-agent|copilot-pull-request-reviewer)$") | not) | .number] | .[]')
+
+          if [[ -z "$PRS" ]]; then
+            echo "No open non-bot PRs targeting dev — nothing to do."
+            exit 0
+          fi
+
+          CONFLICTS=()
+
+          for PR in $PRS; do
+            echo "Updating PR #$PR..."
+            if RESULT=$(gh pr update-branch "$PR" --repo "$REPO" --rebase 2>&1); then
+              echo "  ✓ #$PR: $RESULT"
+            else
+              echo "  ✗ #$PR could not be rebased — likely has a merge conflict."
+              echo "    Details: $RESULT"
+              CONFLICTS+=("$PR")
+
+              # Open a GitHub issue so the conflict is never silently ignored.
+              PR_URL=$(gh pr view "$PR" --repo "$REPO" --json url --jq '.url')
+              PR_TITLE=$(gh pr view "$PR" --repo "$REPO" --json title --jq '.title')
+              ISSUE_BODY=$(printf '## Merge Conflict Detected\n\n**PR:** [#%s - %s](%s)\n**Triggered by:** push to `dev` by `%s`\n\nThe auto-rebase workflow attempted to rebase this PR onto the latest `dev` but failed due to merge conflicts.\n\n### Required action\n\n1. Check out the branch locally:\n```bash\ngit fetch origin\ngit checkout <branch-name>\ngit rebase origin/dev\n```\n2. Resolve conflicts, then:\n```bash\ngit add .\ngit rebase --continue\ngit push --force-with-lease\n```\n3. Close this issue once the PR is conflict-free.\n\n### Error details\n```\n%s\n```' \
+                "$PR" "$PR_TITLE" "$PR_URL" "$ACTOR" "$RESULT")
+              gh issue create \
+                --repo "$REPO" \
+                --title "Merge conflict: PR #${PR} cannot be auto-rebased onto dev" \
+                --body "$ISSUE_BODY" \
+                --label "conflict" 2>/dev/null || \
+              gh issue create \
+                --repo "$REPO" \
+                --title "Merge conflict: PR #${PR} cannot be auto-rebased onto dev" \
+                --body "$ISSUE_BODY" 2>&1 || echo "  ✗ Failed to create conflict issue for PR #${PR}"
+            fi
+          done
+
+          if [[ ${#CONFLICTS[@]} -gt 0 ]]; then
+            echo ""
+            echo "⚠️  PRs that need manual conflict resolution: ${CONFLICTS[*]}"
+            echo "GitHub issues have been created for each conflicted PR."
+          fi
+
+          echo "Done."

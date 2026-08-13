@@ -1,0 +1,136 @@
+# When Copilot submits a review on a dev PR:
+# 1. Posts a structured comment listing every unresolved thread
+# 2. Opens a GitHub Issue tagged "agent-action-required" as a persistent signal
+#    so the Cursor agent has a hard-to-miss indicator that work is needed.
+#
+# This fires on EVERY Copilot review submission — including re-reviews after
+# the agent pushes fixes. The label guard was removed intentionally so subsequent
+# reviews are never silently ignored.
+#
+# The Cursor agent must:
+#   - Check open "agent-action-required" issues at the start of each session
+#   - Work through each unresolved thread per the Copilot feedback loop in
+#     .cursor/rules/git-pr-workflow.mdc
+#   - Close the issue when all threads are resolved and the PR is ready
+
+name: Copilot Review Complete
+run-name: "Copilot suggestions — PR #${{ github.event.pull_request.number }} (${{ github.event.review.state }}) by ${{ github.event.review.user.login }}"
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+concurrency:
+  group: copilot-review-complete-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    name: Post review-ready notification and open tracking issue
+    if: |
+      (github.event.review.user.login == 'github-copilot[bot]' ||
+       github.event.review.user.login == 'copilot' ||
+       github.event.review.user.login == 'copilot-pull-request-reviewer[bot]' ||
+       github.event.review.user.login == 'copilot-pull-request-reviewer') &&
+      (github.event.review.state == 'commented' ||
+       github.event.review.state == 'changes_requested') &&
+      github.event.pull_request.base.ref == 'dev'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Fetch unresolved threads and post comment + tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          OWNER="${REPO%%/*}"
+          NAME="${REPO#*/}"
+
+          # Fetch all unresolved review threads for this PR
+          THREADS=$(gh api graphql -f query='
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  reviewThreads(first: 50) {
+                    nodes {
+                      isResolved
+                      path
+                      line
+                      comments(first: 1) {
+                        nodes { body }
+                      }
+                    }
+                  }
+                }
+              }
+            }' \
+            -f owner="$OWNER" -f name="$NAME" -F number="$PR" \
+            --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)]')
+
+          COUNT=$(echo "$THREADS" | jq 'length')
+
+          if [[ "$COUNT" -eq 0 ]]; then
+            gh pr comment "$PR" --repo "$REPO" \
+              --body "✅ **Copilot reviewed this PR and left no unresolved comments.** All clear — ready for final CI check and merge."
+            exit 0
+          fi
+
+          # Build the thread table rows
+          ROWS=""
+          for i in $(seq 0 $((COUNT - 1))); do
+            PATH_VAL=$(echo "$THREADS" | jq -r ".[$i].path // \"(general)\"")
+            LINE_VAL=$(echo "$THREADS" | jq -r ".[$i].line // \"—\"")
+            BODY=$(echo "$THREADS" | jq -r ".[$i].comments.nodes[0].body" | head -c 120 | tr '\n' ' ')
+            ROWS="${ROWS}| pending | \`${PATH_VAL}\` line ${LINE_VAL} | ${BODY}... |\n"
+          done
+
+          TABLE_ROWS=$(printf "%b" "$ROWS")
+          PR_COMMENT="$(printf '%s\n\n%s\n\n%s\n%s\n%s\n\n%s' \
+            "Copilot review complete — ${COUNT} comment(s) need attention on PR #${PR}." \
+            "A Cursor agent will now address each one directly in this branch. Progress updates will appear here as each comment is handled." \
+            "| Status | File | Comment (truncated) |" \
+            "|--------|------|---------------------|" \
+            "${TABLE_ROWS}" \
+            "Status key: pending / fixed in code / skipped (with reason)")"
+          gh pr comment "$PR" --repo "$REPO" --body "$PR_COMMENT"
+
+          # Ensure the agent-action-required label exists
+          gh label create "agent-action-required" \
+            --color "e4e669" \
+            --description "A Cursor agent needs to address Copilot review comments" \
+            --repo "$REPO" 2>/dev/null || true
+
+          # Upsert the tracking issue: update existing open issue for this PR if one
+          # exists, otherwise create a new one. This prevents issue pile-up on PRs that
+          # go through multiple Copilot review rounds.
+          EXISTING_ISSUE=$(gh issue list \
+            --repo "$REPO" \
+            --label "agent-action-required" \
+            --state open \
+            --json number,title \
+            --jq "[.[] | select(.title | test(\"PR #${PR}[^0-9]\"; \"g\"))] | .[0].number // empty")
+
+          ISSUE_BODY=$(printf '## Copilot Review Needs Agent Action\n\n**PR:** [#%s - %s](%s)\n**Unresolved threads:** %s\n\n### Agent checklist\n- [ ] Pull all unresolved threads: `gh api graphql ...` (see docs/COPILOT_PR_WORKFLOW.md)\n- [ ] Fix or skip each comment with documented reasoning\n- [ ] Push fixes to the branch\n- [ ] Resolve all threads via GraphQL mutation\n- [ ] Verify CI is green\n- [ ] Auto-merge the PR or notify Phil if security-sensitive files are changed\n- [ ] Close this issue\n\nSee `.cursor/rules/git-pr-workflow.mdc` for the full Copilot feedback loop and decision framework.' \
+            "$PR" "$PR_TITLE" "$PR_URL" "$COUNT")
+
+          if [ -n "$EXISTING_ISSUE" ]; then
+            # Update the existing issue body and title to reflect latest review round
+            gh issue edit "$EXISTING_ISSUE" \
+              --repo "$REPO" \
+              --title "Agent action required: Copilot reviewed PR #${PR} — ${COUNT} comment(s) to address" \
+              --body "$ISSUE_BODY" 2>&1 || echo "Warning: could not update tracking issue #${EXISTING_ISSUE}"
+            echo "Updated existing tracking issue #${EXISTING_ISSUE} for PR #${PR}"
+          else
+            gh issue create \
+              --repo "$REPO" \
+              --title "Agent action required: Copilot reviewed PR #${PR} — ${COUNT} comment(s) to address" \
+              --body "$ISSUE_BODY" \
+              --label "agent-action-required" 2>&1 || echo "Warning: could not create tracking issue"
+            echo "Created new tracking issue for PR #${PR}"
+          fi

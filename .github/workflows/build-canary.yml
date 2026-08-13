@@ -1,0 +1,200 @@
+# Build Canary
+#
+# Runs every Monday at 9 AM UTC against both dev and main branches.
+# Catches Railway/Nixpacks environment drift and dependency breakage
+# *before* it surfaces at promotion time.
+#
+# On failure: posts a red card to Teams + files a deduped GitHub issue
+# with labels canary-failure + agent-action-required.
+
+name: Build Canary
+run-name: "Build Canary — ${{ github.event_name == 'schedule' && 'scheduled Monday check' || 'manual trigger' }}"
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Every Monday at 9 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CHECKPOINT_DISABLE: "1"
+  DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/canary?schema=public"
+  AUTH_SECRET: "canary-build-check-secret"
+  NEXTAUTH_URL: "http://localhost:3000"
+
+jobs:
+  canary-dev:
+    name: Canary — dev branch
+    runs-on: ubuntu-latest
+    # Canary failures are informational — never block other workflows.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+  canary-main:
+    name: Canary — main branch
+    runs-on: ubuntu-latest
+    # Canary failures are informational — never block other workflows.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+  notify-failure:
+    name: Notify on failure
+    runs-on: ubuntu-latest
+    needs: [canary-dev, canary-main]
+    if: failure()
+    continue-on-error: true
+
+    steps:
+      - name: Determine which branches failed
+        id: failed
+        run: |
+          DEV_RESULT="${{ needs.canary-dev.result }}"
+          MAIN_RESULT="${{ needs.canary-main.result }}"
+          FAILED=""
+          [ "$DEV_RESULT" = "failure" ] && FAILED="${FAILED}dev "
+          [ "$MAIN_RESULT" = "failure" ] && FAILED="${FAILED}main"
+          echo "branches=$(echo "$FAILED" | xargs)" >> "$GITHUB_OUTPUT"
+
+      - name: Post Teams notification
+        if: ${{ secrets.TEAMS_WEBHOOK_URL != '' }}
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          FAILED_BRANCHES: ${{ steps.failed.outputs.branches }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="🚨 Weekly build canary failed"
+          BODY="Failed branches: ${FAILED_BRANCHES} — npm run build broke. Fix before next promotion."
+
+          jq -n \
+            --arg title "$TITLE" \
+            --arg body  "$BODY" \
+            --arg url   "$RUN_URL" \
+            '{
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "type": "AdaptiveCard",
+                  "$schema": "https://adaptivecards.io/schemas/adaptive-card.json",
+                  "version": "1.4",
+                  "body": [
+                    {
+                      "type": "TextBlock",
+                      "text": $title,
+                      "weight": "Bolder",
+                      "size": "Medium",
+                      "wrap": true,
+                      "style": "attention"
+                    },
+                    {
+                      "type": "TextBlock",
+                      "text": $body,
+                      "wrap": true,
+                      "spacing": "Small",
+                      "isSubtle": true
+                    }
+                  ],
+                  "actions": [{
+                    "type": "Action.OpenUrl",
+                    "title": "View run logs",
+                    "url": $url
+                  }]
+                }
+              }]
+            }' > /tmp/canary_payload.json
+
+          http_code=$(curl -s -o /tmp/canary_response.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/canary_payload.json \
+            "$TEAMS_WEBHOOK_URL")
+
+          echo "Teams response: HTTP $http_code"
+          cat /tmp/canary_response.txt || true
+
+      - name: Create or update GitHub issue
+        uses: actions/github-script@v7
+        env:
+          FAILED_BRANCHES: ${{ steps.failed.outputs.branches }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const { FAILED_BRANCHES, RUN_URL } = process.env;
+
+            // Ensure required labels exist before referencing them
+            for (const [name, color, description] of [
+              ['canary-failure', 'e11d48', 'Weekly build canary failed'],
+              ['agent-action-required', 'd93f0b', 'Requires agent action before new work begins'],
+            ]) {
+              try {
+                await github.rest.issues.createLabel({ owner: context.repo.owner, repo: context.repo.repo, name, color, description });
+              } catch (err) {
+                if (err.status !== 422) throw err; // 422 = already exists, safe to ignore
+              }
+            }
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'canary-failure',
+              state: 'open',
+            });
+
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body: `Another canary failure on: **${FAILED_BRANCHES}** — [view run](${RUN_URL})`,
+              });
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 Weekly build canary failed — ${FAILED_BRANCHES}`,
+              body: [
+                `## Build canary failed`,
+                ``,
+                `| | |`,
+                `|---|---|`,
+                `| **Failed branches** | \`${FAILED_BRANCHES}\` |`,
+                `| **Run** | [View logs](${RUN_URL}) |`,
+                ``,
+                `## Agent: resolve before starting new work`,
+                `1. Open the run logs and identify the failing step`,
+                `2. Fix the root cause on the affected branch(es)`,
+                `3. Trigger this workflow manually (Actions → Build Canary → Run workflow) to confirm it passes`,
+                `4. Close this issue`,
+              ].join('\n'),
+              labels: ['canary-failure', 'agent-action-required'],
+            });

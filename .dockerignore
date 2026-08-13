@@ -1,0 +1,11 @@
+# Build context for future app image; keeps `docker build` fast and lean.
+.git
+.next
+node_modules
+npm-debug.log*
+.env
+.env.*
+!.env.example
+coverage
+*.md
+__tests__

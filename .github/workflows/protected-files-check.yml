@@ -1,0 +1,82 @@
+# Warn contributors early when a PR touches protected memory/rules files.
+#
+# Posts a single comment on PR open explaining that Phil must approve before merge.
+# Only fires on `opened` (not `synchronize`) to avoid comment spam.
+# Only fires for non-Phil, non-bot authors — Phil can touch these files freely.
+#
+# The hard merge gate is enforced by CODEOWNERS + branch protection
+# (require_code_owner_reviews: true). This workflow is the early warning so
+# contributors aren't surprised when the Merge button stays disabled.
+
+name: Protected Files Check
+run-name: "Protected files check — PR #${{ github.event.pull_request.number }}"
+
+on:
+  pull_request:
+    types: [opened]
+    branches: [dev]
+    paths:
+      - '.cursor/rules/**'
+      - 'docs/**'
+      - 'DEV_NOTES.md'
+      - 'PROJECT_TRACKER.md'
+      - 'LAYOUT_RULES.md'
+      - 'DESIGN-SYSTEM.md'
+      - 'AGENT_COLLAB.md'
+      - 'CONTRIBUTING.md'
+      - 'CHANGELOG.md'
+      - '.github/**'
+
+jobs:
+  warn:
+    name: Warn — protected files touched
+    if: |
+      github.event.pull_request.user.login != 'cp-build-dev' &&
+      github.event.pull_request.user.login != 'copilot-swe-agent' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: List changed protected files
+        id: changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(gh api \
+            "/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate \
+            --jq '.[].filename' \
+            | grep -E '^(\.cursor/rules/|docs/|\.github/|DEV_NOTES\.md|PROJECT_TRACKER\.md|LAYOUT_RULES\.md|DESIGN-SYSTEM\.md|AGENT_COLLAB\.md|CONTRIBUTING\.md|CHANGELOG\.md)' \
+            | sed 's/^/- `/' | sed 's/$/`/' \
+            || echo "- (could not list files)")
+          printf 'files<<EOF\n%s\nEOF\n' "$FILES" >> "$GITHUB_OUTPUT"
+
+      - name: Post warning comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "$(printf '%s' '⚠️ **Protected files detected**
+
+This PR modifies files owned by @cp-build-dev:
+
+${{ steps.changed.outputs.files }}
+
+**These changes require Phil'"'"'s explicit approval before merge.** GitHub will block the Merge button until he reviews. This is by design — contributor agents should not modify shared memory without Phil'"'"'s sign-off.
+
+If you believe this change is necessary, leave a comment explaining why and tag @cp-build-dev.')"
+
+  # Always-passing gate job — prevents GitHub from marking the workflow as
+  # failed when `warn` is skipped (e.g. Phil's own PRs or bot PRs). GitHub
+  # treats a workflow with zero completed jobs as a failure, not a skip.
+  done:
+    name: Protected files check complete
+    runs-on: ubuntu-latest
+    needs: [warn]
+    if: always()
+    steps:
+      - run: echo "Protected files check complete (or intentionally skipped)"

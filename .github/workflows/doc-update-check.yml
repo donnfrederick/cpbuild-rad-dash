@@ -1,0 +1,114 @@
+name: Doc Update Check
+run-name: "Doc check — PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+
+# When a PR changes API routes, the DB schema, or shared lib patterns,
+# check whether the matching contract/pack doc was also updated.
+# If not, add the `needs-doc-update` label so it's visible without blocking.
+# Strictness: label-only (chosen by team — not a merge blocker yet).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check:
+    name: Check docs are current
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get changed files
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          FILES=$(gh pr view "$PR" --repo "$REPO" --json files --jq '[.files[].path] | join("\n")')
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Check API contracts
+        id: api_check
+        env:
+          CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # Touched app/api/ but NOT docs/contracts/api-contracts.md?
+          if echo "$CHANGED" | grep -q "^app/api/" && \
+             ! echo "$CHANGED" | grep -qF "docs/contracts/api-contracts.md"; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "reason=API route changed but docs/contracts/api-contracts.md was not updated" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check DB contracts
+        id: db_check
+        env:
+          CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # Touched prisma/ but NOT docs/contracts/db-schema-notes.md?
+          if echo "$CHANGED" | grep -q "^prisma/" && \
+             ! echo "$CHANGED" | grep -qF "docs/contracts/db-schema-notes.md"; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Prisma schema/migration changed but docs/contracts/db-schema-notes.md was not updated" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check base pack
+        id: lib_check
+        env:
+          CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # Touched lib/ but NOT docs/packs/base-pack.md?
+          if echo "$CHANGED" | grep -q "^lib/" && \
+             ! echo "$CHANGED" | grep -qF "docs/packs/base-pack.md"; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply needs-doc-update label
+        if: |
+          steps.api_check.outputs.needs_update == 'true' ||
+          steps.db_check.outputs.needs_update == 'true' ||
+          steps.lib_check.outputs.needs_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          API_NEEDS: ${{ steps.api_check.outputs.needs_update }}
+          DB_NEEDS: ${{ steps.db_check.outputs.needs_update }}
+          LIB_NEEDS: ${{ steps.lib_check.outputs.needs_update }}
+        run: |
+          # Ensure label exists
+          gh label create "needs-doc-update" \
+            --color "f9d0c4" \
+            --description "Contracts or patterns changed — docs should be updated" \
+            --repo "$REPO" 2>/dev/null || true
+
+          gh pr edit "$PR" --repo "$REPO" --add-label "needs-doc-update" || true
+
+          # Build comment body
+          REASONS=""
+          [ "$API_NEEDS" = "true" ] && REASONS="${REASONS}- API route changed but \`docs/contracts/api-contracts.md\` was not updated\n"
+          [ "$DB_NEEDS"  = "true" ] && REASONS="${REASONS}- Prisma schema/migration changed but \`docs/contracts/db-schema-notes.md\` was not updated\n"
+          [ "$LIB_NEEDS" = "true" ] && REASONS="${REASONS}- \`lib/\` changed but \`docs/packs/base-pack.md\` was not updated\n"
+
+          BODY=$(printf '📋 **Doc update reminder** (label: `needs-doc-update`)\n\nThis PR touches shared contracts or patterns, but the matching doc was not updated:\n\n%b\nIf this change is intentional and the doc is already accurate, remove the label manually. If not, please update the doc and push.' "$REASONS")
+
+          # Check for existing comment to avoid duplication
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR}/comments" \
+            --jq '[.[] | select(.body | startswith("📋 **Doc update reminder**"))] | .[0].id // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" \
+              --field body="$BODY" > /dev/null || true
+          else
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY" || true
+          fi

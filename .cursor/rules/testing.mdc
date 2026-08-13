@@ -1,0 +1,64 @@
+# Testing Standards — RadDash
+
+Every code change requires corresponding tests. No exceptions.
+
+## Test Types Required
+
+| What you're changing | Required tests |
+|----------------------|---------------|
+| Pure utility / lib function | Unit test in `__tests__/unit/` |
+| React component | Unit test (render + interaction) in `__tests__/unit/` |
+| API route handler | Integration test in `__tests__/integration/` |
+| Full user flow (auth, form, navigation) | E2E test in `e2e/` |
+| Permission / auth logic | Unit + integration |
+| Task integration endpoint | Integration test with fixture where all nullable fields are null |
+
+## Directory Layout
+
+```
+__tests__/
+  unit/         # Vitest — isolated, no DB, no network
+  integration/  # Vitest + MSW — API handlers with mocked DB
+e2e/            # Playwright — real browser, running app
+```
+
+## Unit Tests
+
+- Use `vitest` + `@testing-library/react` + `@testing-library/user-event`
+- Mock all external dependencies
+- One `describe` block per function/component
+- Name: `<subject>.unit.test.ts(x)`
+
+## Integration Tests
+
+- Use MSW to mock fetch calls
+- Test: happy path, auth failure (401), bad input (400), forbidden (403)
+- Name: `<subject>.integration.test.ts`
+
+### Command Center Integration Fixture Rule
+
+Any route that accepts data from Command Center must include at least one fixture where each nullable field is `null`, `""`, or omitted. Never hardcode non-empty values for all fixtures.
+
+## Coverage Targets
+
+- Utilities / lib: **90%+**
+- API routes: **80%+** (integration)
+- Components: **70%+** (unit)
+- Critical paths (auth, permissions, task integration): **100%**
+
+## After Every Change
+
+```bash
+npm run test:unit
+npm run test:integration
+npm run test:smoke
+npm run test:coverage
+```
+
+## Continuous Test Maintenance
+
+Whenever a file is modified:
+1. Audit coverage of the entire file — not just lines you changed
+2. Review existing tests for accuracy — would they catch a real regression?
+3. Calibrate assumptions with Phil before writing tests for product behavior questions
+4. Flag dead-code tests with an inline `// NOTE:` comment
